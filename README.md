@@ -11,6 +11,11 @@ irm https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-pa
 ```
 Downloads the latest `panda.exe`, adds it to your PATH, and offers to install Ollama.
 
+**Windows, from cmd.exe** (the line above is PowerShell syntax and does not work in cmd):
+```bat
+curl -fsSL https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.cmd -o "%TEMP%\get-panda.cmd" && "%TEMP%\get-panda.cmd"
+```
+
 **macOS / Linux** (needs Node.js 20.3+):
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.sh | sh
