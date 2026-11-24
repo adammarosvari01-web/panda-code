@@ -9,6 +9,7 @@
 #   PANDA_NO_PATH=1    don't touch the PATH
 #   PANDA_SKIP_OLLAMA=1  don't offer to install Ollama
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'   # the progress bar makes downloads many times slower in Windows PowerShell 5.1
 $Repo       = if ($env:PANDA_REPO) { $env:PANDA_REPO } else { 'adammarosvari01-web/panda-code' }
 $Source     = $env:PANDA_SOURCE
 $InstallDir = if ($env:PANDA_INSTALL_DIR) { $env:PANDA_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\PandaCode' }
