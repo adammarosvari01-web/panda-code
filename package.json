@@ -1,0 +1,20 @@
+﻿{
+  "name": "panda-code",
+  "version": "1.0.0",
+  "description": "Panda Code: a terminal coding agent for local AI models (Ollama, LM Studio, llama.cpp, any OpenAI-compatible server)",
+  "bin": {
+    "pandacode": "panda.js",
+    "panda": "panda.js"
+  },
+  "main": "panda.js",
+  "files": [
+    "panda.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.3"
+  },
+  "keywords": ["ai", "coding-agent", "cli", "ollama", "local-llm", "terminal"],
+  "license": "MIT"
+}
+

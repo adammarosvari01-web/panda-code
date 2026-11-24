@@ -1,0 +1,6 @@
+{
+  "main": "panda.js",
+  "output": "dist/panda.exe",
+  "disableExperimentalSEAWarning": true,
+  "useCodeCache": false
+}
