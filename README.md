@@ -47,6 +47,15 @@ Ollama gives a model a small context window unless it is told otherwise, so long
 Panda notices this and recovers, and `pandacode doctor` (or `/doctor` inside Panda) shows what Ollama really uses and how to fix it.
 On Linux and macOS the installer can apply the fix for you: `curl -fsSL https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.sh | sh -s fix-ollama`.
 
+## Discord bot
+
+`/discord` lets people on a Discord server @mention Panda (or DM it) and get answers from the model Panda is currently using. Panda needs a free **bot** for this: webhooks can only send messages, they cannot listen.
+
+1. Create an application at https://discord.com/developers/applications, open its **Bot** tab and copy the token.
+2. In Panda: `/discord token <token>`, then `/discord on`. Panda prints an invite link; open it to add the bot to your server.
+3. `/discord off` turns it off. `/discord status` shows what it is doing.
+
+It is chat-only: people on Discord get no access to your files, shell or anything else on your PC. Each person can ask once every 10 seconds (`/discord cooldown <seconds>`), and `/discord channel <id>` limits it to one channel. With a webhook (`/discord webhook <url>`) you can also post announcements: `/discord say <text>`.
 ## Build and release (maintainers)
 
 ```powershell
