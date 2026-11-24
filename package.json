@@ -1,6 +1,6 @@
-﻿{
+{
   "name": "panda-code",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Panda Code: a terminal coding agent for local AI models (Ollama, LM Studio, llama.cpp, any OpenAI-compatible server)",
   "bin": {
     "pandacode": "panda.js",

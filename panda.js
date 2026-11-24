@@ -10,7 +10,7 @@ const cp = require('child_process');
 const readline = require('readline');
 const { AsyncLocalStorage } = require('async_hooks');
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -1601,10 +1601,13 @@ async function modelTurn(messages, opts) {
   }
   if (!calls.length && text.includes('<tool_call>')) calls = parseTextToolCalls(text);
   text = text.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '').trim();
-  return { text, calls, finish };
+  // Ollama cuts off the START of a conversation that does not fit ("truncating input prompt"). When that happens its prompt count
+  // lands exactly on the context limit, and the model then answers without its instructions/tools (often with nothing at all).
+  const truncated = !!(usage && usage.cachedAware && state.kind === 'ollama' && opts.depth === 0 && usage.prompt >= state.numCtx - 8);
+  return { text, calls, finish, truncated };
 }
 async function agentLoop(messages, opts) {
-  let overflow = 0, cont = 0; const fails = new Map();
+  let overflow = 0, cont = 0, trunc = 0, empty = 0; const fails = new Map();
   for (let step = 0; step < 150; step++) {
     if (opts.depth === 0) await maybeCompact(opts);
     let r;
@@ -1631,8 +1634,22 @@ async function agentLoop(messages, opts) {
       }
       throw e;
     }
+    if (r.truncated) { // the reply was written from a chopped-off conversation: throw it away, shrink the chat, and ask again
+      SP().stop();
+      if (trunc++ < 3) { out(C.yellow(`  ⚠ Ollama cut off the start of the conversation (it hit its ${state.numCtx}-token limit). Compacting and retrying…`)); await maybeCompact(opts, true); step--; continue; }
+      out(C.red(`  ⚠ Ollama keeps truncating the conversation at ${state.numCtx} tokens. Run /doctor to see why and how to fix it.`));
+      return null;
+    }
+    if (opts.depth === 0 && state.kind === 'ollama' && state.ctxChecked !== state.model) { state.ctxChecked = state.model; await syncContext(); } // once per model: what context did Ollama really give us?
     messages.push(r.calls.length ? { role: 'assistant', content: r.text, tool_calls: r.calls } : { role: 'assistant', content: r.text });
     if (!r.calls.length) {
+      // An empty reply is how a model "stops" without doing anything: nudge it instead of ending the turn.
+      if (!String(r.text).trim() && empty < 2) {
+        empty++; messages.pop();
+        out(C.gray('  ⎿  empty reply, asking the model to continue…'));
+        messages.push({ role: 'user', content: '[Your last reply was empty. Continue the task: call a tool, or give your final answer.]' });
+        continue;
+      }
       // The reply was cut off by the output-token limit: ask the model to carry on instead of ending mid-sentence.
       if (r.finish === 'length' && cont < 5) {
         cont++;
@@ -1945,7 +1962,7 @@ async function handleBtw(arg) {
   askSide(a).catch(e => out(C.red('  ⎿  ' + (e.message || e)))); // runs in the background; the main prompt stays free
 }
 
-const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/yolo', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
+const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/yolo', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
 const ui = {
   ghost: '', skipTab: false, menuLines: null, inSelect: false,
   rl: null, pending: null, queue: [], busy: false, lines: [], timer: null, cont: '', lastSig: 0, abort: null, handler: null,
@@ -2495,6 +2512,62 @@ async function updateCmd(arg, { headless = false } = {}) {
     say(C.green(`  ✓ Updated to ${u.latest}.`) + C.gray(' Close Panda and start it again to use it.'));
   } catch (e) { say(C.red('  Update failed: ' + (e.message || e))); }
 }
+// ───────────────────────────── Ollama context doctor ─────────────────────────────
+// Ollama decides how much context a loaded model really gets. If that is less than Panda asked for, long chats get truncated and the AI stops.
+async function loadedContext() {
+  try {
+    const j = await (await fetch(state.baseUrl.replace(/\/+$/, '') + '/api/ps', { headers: authHeaders(), signal: AbortSignal.timeout(3000) })).json();
+    const m = (j.models || []).find(x => normName(x.name || '') === normName(state.model) || normName(x.model || '') === normName(state.model));
+    return m ? (m.context_length || 0) : 0;
+  } catch { return 0; }
+}
+async function syncContext() {
+  const c = await loadedContext();
+  if (c && c < state.numCtx * 0.98) {
+    out(C.yellow(`  ⚠ Ollama is running ${state.model} with a ${c}-token context, not the ${state.numCtx} Panda asked for. Panda adapted to ${c}; run /doctor to fix it properly.`));
+    state.numCtx = c;
+  }
+}
+function ollamaFixText() {
+  const ctx = 32768;
+  if (process.platform === 'linux') return [
+    'Linux (Ollama runs as a systemd service, which does not read your shell settings):',
+    '  sudo systemctl edit ollama',
+    '  # add these lines, save, and exit:',
+    '  [Service]',
+    `  Environment="OLLAMA_CONTEXT_LENGTH=${ctx}"`,
+    '  Environment="OLLAMA_NUM_PARALLEL=1"',
+    '  sudo systemctl restart ollama',
+    '  (or let the installer do it:  curl -fsSL https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.sh | sh -s fix-ollama)'];
+  if (process.platform === 'darwin') return [
+    'macOS (the Ollama app does not read your shell settings):',
+    `  launchctl setenv OLLAMA_CONTEXT_LENGTH ${ctx}`, '  launchctl setenv OLLAMA_NUM_PARALLEL 1', '  then quit Ollama from the menu bar and open it again'];
+  return [
+    'Windows:',
+    `  setx OLLAMA_CONTEXT_LENGTH ${ctx}`, '  setx OLLAMA_NUM_PARALLEL 1', '  then quit Ollama from the tray icon and start it again'];
+}
+async function doctorCmd() {
+  const row = (ok, label, detail) => out(`  ${ok === true ? C.green('✓') : ok === false ? C.red('✗') : C.yellow('!')} ${C.bold(label.padEnd(11))} ${C.gray(detail || '')}`);
+  out(C.bold('  Panda doctor') + C.gray(` · ${process.platform} · ${describeHardware()}`));
+  if (!state.baseUrl) { row(null, 'Server', 'none set yet: start Panda once and pick one'); return; }
+  if (state.kind !== 'ollama') { row(null, 'Server', `${state.providerName} at ${state.baseUrl}: its context size is set inside that server, not by Panda`); return; }
+  const base = state.baseUrl.replace(/\/+$/, '');
+  try { row(true, 'Ollama', `version ${(await (await fetch(base + '/api/version', { signal: AbortSignal.timeout(4000) })).json()).version} at ${state.baseUrl}`); }
+  catch { row(false, 'Ollama', `not reachable at ${state.baseUrl}. Is it running?`); return; }
+  if (!state.model) { row(null, 'Model', 'none chosen yet: use /model'); return; }
+  let c = await loadedContext();
+  if (!c) { // the model is not loaded right now: load it with a tiny request, then look again
+    try { await fetch(base + '/api/generate', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ model: state.model, prompt: 'hi', stream: false, keep_alive: state.keepAlive, options: { num_ctx: state.numCtx, num_predict: 1 } }), signal: AbortSignal.timeout(120000) }); } catch { }
+    c = await loadedContext();
+  }
+  let bad = false;
+  if (!c) row(null, 'Context', 'could not read the loaded context from Ollama (older version?)');
+  else if (c >= state.numCtx) row(true, 'Context', `${state.model} runs with ${c} tokens (Panda asks for ${state.numCtx})`);
+  else { bad = true; row(false, 'Context', `${state.model} runs with only ${c} tokens, but Panda asks for ${state.numCtx}. Long chats get cut off ("truncating input prompt") and the AI stops.`); }
+  row(c && c < 8192 ? false : true, 'Room', c && c < 8192 ? `${c} tokens is too little for Panda's tools; aim for 16384 or more` : 'enough for Panda\'s tools and a real conversation');
+  row(true, 'Safeguards', 'Panda compacts the chat at 60% of the context, notices a cut-off prompt and retries, and re-prompts empty replies');
+  if (bad || c === 0) { out(''); for (const l of ollamaFixText()) out(C.gray('  ' + l)); }
+}
 async function setupProvider(force) {
   if (!force && state.baseUrl) return true;
   out(C.gray('  Looking for local AI servers…'));
@@ -2538,6 +2611,7 @@ ${C.bold('Commands')}
   ${C.bamboo('/flaws')} <purpose>   Tell Panda what the project is for; it analyses everything and tells you what's wrong or missing
   ${C.bamboo('/imagine')} <prompt>  Generate an image with a local image model ${C.gray('(--size 1024x1024 --steps 30 --seed 7 --neg "blurry" --enhance)')}
   ${C.bamboo('/undo')}              Roll back the file changes Panda made in its last request
+  ${C.bamboo('/doctor')}            Check what context Ollama really gives the model, and how to fix "truncating input prompt" / the AI stopping
   ${C.bamboo('/update')}            Check for a newer Panda Code and install it ${C.gray('(also: pandacode update)')}
   ${C.bamboo('/think')} on|off|auto|show|hide   Model thinking & whether to display it
   ${C.bamboo('/init')}              Create a PANDA.md guide for this project
@@ -2566,6 +2640,7 @@ async function slash(text) {
     case '/btw': await handleBtw(arg); break;
     case '/flaws': await flawsCmd(arg); break;
     case '/update': await updateCmd(arg); break;
+    case '/doctor': await doctorCmd(); break;
     case '/imagine': await imagineCmd(arg); break;
     case '/undo': { const d = undoLast(); out(d && d.length ? d.map(x => C.gray('  ⎿  ') + x).join('\n') + '\n' + C.gray('  (changes made through the shell are not tracked)') : C.gray('  Nothing to undo.')); break; }
     case '/mouse': {
@@ -2727,6 +2802,7 @@ Env: PANDA_URL, PANDA_MODEL, PANDA_API_KEY, OLLAMA_HOST`);
     kind: cfg.kind || 'ollama', baseUrl: cfg.baseUrl || '', apiKey: cfg.apiKey || '', model: cfg.model || '', providerName: cfg.providerName || 'Custom',
     numCtx: cfg.numCtx || 32768, think: cfg.think ?? null, showThinking: !!cfg.showThinking, keepAlive: cfg.keepAlive || '30m', pin: cfg.pin, mouse: cfg.mouse, imageUrl: cfg.imageUrl, imageKind: cfg.imageKind, repo: cfg.repo,
   });
+  if (args._[0] === 'doctor') { await doctorCmd(); process.exit(0); }
   if (args._[0] === 'update') { await updateCmd(args._.slice(1).join(' '), { headless: true }); process.exit(0); }
   if (process.env.PANDA_URL) state.baseUrl = process.env.PANDA_URL;
   if (process.env.PANDA_MODEL) state.model = process.env.PANDA_MODEL;

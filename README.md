@@ -36,6 +36,12 @@ pandacode update
 ```
 Updates come from this repository's releases.
 
+## If the AI stops or Ollama says "truncating input prompt"
+
+Ollama gives a model a small context window unless it is told otherwise, so long chats get cut off at the start and the AI loses its instructions.
+Panda notices this and recovers, and `pandacode doctor` (or `/doctor` inside Panda) shows what Ollama really uses and how to fix it.
+On Linux and macOS the installer can apply the fix for you: `curl -fsSL https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.sh | sh -s fix-ollama`.
+
 ## Build and release (maintainers)
 
 ```powershell
