@@ -61,6 +61,32 @@ Needs a model that can see images (marked "vision" in `/model`) and **bypass per
 
 **Be careful:** a model controlling your PC can make mistakes. Close anything sensitive, stay nearby, and do not use it for payments or irreversible actions. Panda will not type into password boxes. Esc and clicks may not reach programs running as administrator.
 
+## Playing games (Windows)
+
+```
+/bypasspermissions
+play minecraft and collect wood
+/play minecraft build a small shelter
+/play finish the first level
+```
+
+Open the game first. Any model can play:
+
+- **Skills** tell the model how a game works. Minecraft (Java Edition default controls) is built in, and so is a general skill for any other game. `/play skill <name>` creates a file in `~/.panda/games` where you describe another game, or add your own tips for a built-in one.
+- **Models that cannot see** play through the smallest vision model installed in Ollama, which describes the screen for them.
+- Panda holds keys, turns the camera smoothly, aims at what the model points to, mines, places, and clicks in menus.
+
+How it stays contained:
+
+1. It needs **bypass permissions** on, and asks once per conversation before starting.
+2. Input goes **only to the game window**. If another window comes to the front, Panda lets go of everything and pauses until you return.
+3. **Esc stops at once** and releases all keys. Panda never presses Esc, Alt or the Windows key, and does not open chat in Minecraft.
+4. Well-known competitive online games (Valorant, Counter-Strike, Fortnite and others) are refused.
+
+`/play minutes 20` sets how long it plays (10 by default). If the camera turns too far or not far enough, set `/play sensitivity` to the game's own mouse sensitivity (100 is the default).
+
+**What to expect:** a local model takes a few seconds for each move, and the game keeps running while it thinks. It suits slow-paced tasks (gathering, building, menus, turn-based and puzzle games), not fights or reflexes. In Minecraft use Peaceful difficulty. Small models get lost easily. Use single player or a server that allows bots. A game running as administrator will not receive input.
+
 ## Video editing
 
 Ask in plain words, naming your files:
