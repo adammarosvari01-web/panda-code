@@ -10,7 +10,7 @@ const cp = require('child_process');
 const readline = require('readline');
 const { AsyncLocalStorage } = require('async_hooks');
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -1398,6 +1398,7 @@ async function* streamOllama({ system, messages, tools, signal }) {
   // keep_alive: keep the model in VRAM between turns (Ollama's default unloads it after 5 idle minutes).
   const body = { model: curModel(), messages: msgs, stream: true, keep_alive: state.keepAlive, options: { num_ctx: state.numCtx, num_predict: als.getStore()?.numPredict ?? Math.min(16384, Math.max(4096, Math.floor(state.numCtx * 0.3))) } };
   if (tools) body.tools = toolSpecs(tools);
+  if (als.getStore()?.format) body.format = als.getStore().format; // structured JSON output (used by /learn)
   { const th = als.getStore()?.think !== undefined ? als.getStore().think : state.think; if (th !== null && th !== undefined) body.think = th; }
   const res = await fetch(state.baseUrl.replace(/\/+$/, '') + '/api/chat', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body), signal });
   if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 500)}`);
@@ -1962,7 +1963,7 @@ async function handleBtw(arg) {
   askSide(a).catch(e => out(C.red('  ⎿  ' + (e.message || e)))); // runs in the background; the main prompt stays free
 }
 
-const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/yolo', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/discord', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
+const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/yolo', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/discord', '/learn', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
 const ui = {
   ghost: '', skipTab: false, menuLines: null, inSelect: false,
   rl: null, pending: null, queue: [], busy: false, lines: [], timer: null, cont: '', lastSig: 0, abort: null, handler: null,
@@ -2043,7 +2044,7 @@ const ui = {
         const wN = String(items.length).length;
         for (let i = top; i < Math.min(items.length, top + view); i++) {
           const it = items[i], on = i === sel, n = String(i + 1).padStart(wN);
-          const head = on ? C.bamboo('❯ ' + n + '. ') : '  ' + C.gray(n + '. ');
+          const head = o.plain ? (on ? C.bamboo('❯ ') : '  ') : on ? C.bamboo('❯ ' + n + '. ') : '  ' + C.gray(n + '. ');
           let label = String(it.label);
           if (vlen(head) + label.length > cols) label = label.slice(0, Math.max(1, cols - vlen(head) - 1)) + '…';
           let line = head + (on ? C.bold(C.bamboo(label)) : label);
@@ -2076,6 +2077,7 @@ const ui = {
         else if (n === 'end') sel = items.length - 1;
         else if (n === 'return' || n === 'enter') return finish(sel);
         else if (n === 'escape' || (k.ctrl && n === 'c')) return finish(-1);
+        else if (o.letters && /^[a-d]$/i.test(s || '')) return finish('abcd'.indexOf(s.toLowerCase())); // quiz answers
         else if (items.length <= 9 && /^[1-9]$/.test(s || '') && +s <= items.length) return finish(+s - 1);
         else return;
         render();
@@ -2756,6 +2758,251 @@ async function discordCmd(arg) {
     case 'status': default: for (const l of dcStatusLines()) out(l); if (dc.status === 'off' && !dcToken()) out(C.gray('    new here? run /discord setup'));
   }
 }
+// ───────────────────────────── /learn: a tutor that quizzes you and teaches what you miss ─────────────────────────────
+const LEARN_DIR = path.join(HOME_DIR, 'learn');
+const LEARN_NEED = 2; // correct answers in a row to master a lesson
+const LEVEL_WORDS = /^(an? )?((complete )?beginner|basics?|novice|elementary|intermediate|upper[- ]intermediate|advanced|expert|pro|professional|master|mastery|fluent|fluency|gcse|a[- ]?levels?|high school|college|university|degree|masters|phd|interview|exam|job[- ]ready|[abc][12]|grade \d+|year \d+|level \d+)( (level|standard))?$/i;
+// "/learn python to expert", "/learn spanish A2", "/learn how to cook rice" (no level given: Panda asks)
+function parseLearn(arg) {
+  const a = String(arg).trim().replace(/^(me|about)\s+/i, '');
+  let m = a.match(/^(.*?)\s*(?:--level\s+|level:\s*)(.+)$/i);
+  if (m) return { topic: m[1].trim(), level: m[2].trim() };
+  const re = /\s+(?:up to|to|at|until|for)\s+/ig; let last = null, x;
+  while ((x = re.exec(a))) last = x;
+  if (last) { const tail = a.slice(last.index + last[0].length).trim(); if (LEVEL_WORDS.test(tail)) return { topic: a.slice(0, last.index).trim(), level: tail }; }
+  m = a.match(/^(.+?)\s+((?:complete )?beginner|intermediate|advanced|expert|gcse|a[- ]?level|[abc][12])(?: level)?$/i);
+  if (m) return { topic: m[1].trim(), level: m[2] };
+  return { topic: a, level: '' };
+}
+const learnFile = c => path.join(LEARN_DIR, (`${c.topic} ${c.level}`.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 80) || 'course') + '.json');
+function learnSave(c) { c.updated = Date.now(); try { fs.mkdirSync(LEARN_DIR, { recursive: true }); fs.writeFileSync(learnFile(c), JSON.stringify(c, null, 2)); } catch (e) { out(C.yellow('  Could not save your progress: ' + e.message)); } }
+function learnCourses() {
+  try { return fs.readdirSync(LEARN_DIR).filter(f => f.endsWith('.json')).map(f => { try { return JSON.parse(fs.readFileSync(path.join(LEARN_DIR, f), 'utf8')); } catch { return null; } }).filter(c => c && c.topic && Array.isArray(c.lessons)).sort((a, b) => b.updated - a.updated); }
+  catch { return []; }
+}
+const learnProgress = c => `${c.lessons.filter(l => l.mastered).length}/${c.lessons.length} lessons mastered`;
+const tutorSystem = c => `You are a patient, accurate tutor teaching "${c.topic}" to someone aiming for this level: ${c.level}. Be clear and concrete, use plain language, short paragraphs and a worked example where it helps. Use simple markdown: no tables and no LaTeX (write maths in plain text). If you are not sure of a fact, say so.`;
+// One model call. Streams to the screen when `show` is true. `format` asks the server for JSON in a fixed shape.
+async function learnModel({ system, user, signal, label, show = false, format, think = false, numPredict = 1500 }) {
+  const md = show ? new MD(l => out(l), '  ') : null; let text = '';
+  spinner.start(label);
+  try {
+    await als.run({ think, model: state.model, numPredict: think ? 6000 : numPredict, format }, async () => {
+      for await (const ev of streamChat({ system, messages: [{ role: 'user', content: user }], tools: null, signal })) {
+        if (ev.type === 'text') { text += ev.text; spinner.tokens++; if (md) md.push(ev.text); } else if (ev.type === 'think') spinner.tokens++;
+      }
+    });
+  } finally { if (md) md.end(); spinner.stop(); }
+  return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
+}
+function extractJSON(t) {
+  const s = String(t).replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```(?:json)?/g, '').trim();
+  try { return JSON.parse(s); } catch { }
+  const i = s.indexOf('{'), j = s.lastIndexOf('}');
+  if (i >= 0 && j > i) { try { return JSON.parse(s.slice(i, j + 1)); } catch { } }
+  return null;
+}
+const shapeOf = props => ({ type: 'object', properties: props, required: Object.keys(props) });
+const PLAN_SHAPE = shapeOf({ lessons: { type: 'array', items: shapeOf({ name: { type: 'string' }, goal: { type: 'string' } }) } });
+const QUESTION_SHAPE = shapeOf({ question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, minItems: 4, maxItems: 4 }, answer: { type: 'integer' }, explanation: { type: 'string' } });
+const CHECK_SHAPE = shapeOf({ reasoning: { type: 'string' }, answer: { type: 'integer' } });
+async function learnJSON(system, user, shape, signal, label, think = false) {
+  for (let i = 0; i < 3; i++) {
+    const j = extractJSON(await learnModel({ system: system + ' Reply with JSON only, matching this schema: ' + JSON.stringify(shape), user, signal, label, format: shape, think }));
+    if (j) return j;
+  }
+  throw new Error('The model did not return usable data. Try again, or pick a stronger model with /model.');
+}
+async function learnPlan(topic, level, signal) {
+  const j = await learnJSON('You design excellent courses.', `Design a course that takes a learner to this level: ${level}, in: ${topic}. Give 6 to 10 lessons, ordered from the foundations up to the target level. Each lesson has a short name and a one-sentence goal.`, PLAN_SHAPE, signal, 'Planning your course');
+  const lessons = (j.lessons || []).filter(l => l && l.name).slice(0, 12).map(l => ({ name: String(l.name).trim(), goal: String(l.goal || '').trim(), streak: 0, correct: 0, wrong: 0, mastered: false, asked: [] }));
+  if (lessons.length < 3) throw new Error('The model could not plan this course. Try wording the topic differently, or pick a stronger model with /model.');
+  return { topic, level, lessons, created: Date.now() };
+}
+// Validates a model-written question and shuffles the options (models like to put the right answer first).
+function cleanQuestion(j, rnd = Math.random) {
+  if (!j || typeof j.question !== 'string' || !Array.isArray(j.options) || j.options.length !== 4) return null;
+  let options = j.options.map(o => String(o).replace(/\s*\n\s*/g, ' ').trim());
+  if (options.every(o => /^[A-Da-d][).:]\s+/.test(o))) options = options.map(o => o.replace(/^[A-Da-d][).:]\s+/, ''));
+  const answer = Number(j.answer);
+  if (!j.question.trim() || !Number.isInteger(answer) || answer < 0 || answer > 3 || options.some(o => !o)) return null;
+  if (new Set(options.map(o => o.toLowerCase())).size !== 4) return null;
+  if (options.some(o => /\b(all|none) of the (above|these)\b|\bboth [a-d] and [a-d]\b/i.test(o))) return null; // meaningless once shuffled
+  const order = [0, 1, 2, 3];
+  for (let i = 3; i > 0; i--) { const k = Math.floor(rnd() * (i + 1)); [order[i], order[k]] = [order[k], order[i]]; }
+  // sentences that point at "option 2" or "option B" would be wrong after shuffling, so they are dropped
+  const explanation = String(j.explanation || '').split(/(?<=[.!?])\s+/).filter(x => !/\b[Oo]ptions?\s*\(?(?:[A-D]|[0-4])\b/.test(x)).join(' ').trim();
+  return { question: j.question.trim(), options: order.map(i => options[i]), answer: order.indexOf(answer), explanation };
+}
+const optionList = q => q.options.map((o, i) => `${i}: ${o}`).join('\n');
+const letterList = q => q.options.map((o, i) => `${'ABCD'[i]}) ${o}`).join('\n'); // for explanations the learner reads
+async function learnQuestion(c, L, signal) {
+  const avoid = L.asked.slice(-8).map(a => '- ' + a).join('\n');
+  const prompt = `Course: ${c.topic} (target level: ${c.level}).\nLesson: ${L.name}. Goal: ${L.goal}\nThe learner has ${L.correct} right and ${L.wrong} wrong on this lesson so far.\nWrite ONE new multiple-choice question testing this lesson at the target level. Exactly 4 options, exactly one correct, the other three plausible but definitely wrong. Test understanding, not trivia. Never use "all of the above" or "none of the above". "answer" is the index (0-3) of the correct option. The explanation says why that is correct and must not refer to options by letter or position. Plain text, no LaTeX.${avoid ? '\nDo not repeat or reword these earlier questions:\n' + avoid : ''}`;
+  let doubtful = null;
+  for (let i = 0; i < 3; i++) {
+    const q = cleanQuestion(await learnJSON(tutorSystem(c), prompt, QUESTION_SHAPE, signal, 'Writing a question'));
+    if (!q) continue;
+    // second opinion: solve it WITHOUT seeing the answer key, so wrong keys get thrown out
+    const v = await learnJSON('You are a meticulous examiner. Solve the question yourself. Reason briefly first, then give the index (0-3) of the one correct option. If no option or more than one is correct, answer -1.', `${q.question}\n${optionList(q)}`, CHECK_SHAPE, signal, 'Double-checking the answer');
+    if (Number(v.answer) === q.answer) return { ...q, checked: true };
+    doubtful = q;
+  }
+  if (doubtful) return { ...doubtful, checked: false };
+  throw new Error('The model could not write a usable question. Try again, or pick a stronger model with /model.');
+}
+function learnShow(q) {
+  out('');
+  const md = new MD(l => out(l), '  '); md.first = false; md.push(q.question + '\n'); md.end();
+  q.options.forEach((o, i) => out('    ' + C.bamboo('ABCD'[i] + ')') + ' ' + inline(o)));
+  if (!q.checked) out(C.yellow('    (my second check disagreed with the answer key for this one, so treat it with care)'));
+}
+const learnDots = L => C.bamboo('●'.repeat(Math.min(L.streak, LEARN_NEED))) + C.gray('○'.repeat(Math.max(0, LEARN_NEED - L.streak)));
+const isStop = t => t === '\x1b' || t === '\x03' || /^(stop|quit|exit)$/i.test(t);
+async function learnTeach(c, L, signal, request) {
+  out('');
+  await learnModel({ system: tutorSystem(c), user: `Lesson: ${L.name}. Goal: ${L.goal}\n${request}\nKeep it under 250 words.`, signal, label: 'Preparing your lesson', show: true });
+}
+// The learner types something: a question, or "teach me this".
+async function learnTyped(c, L, q, signal, revealed) {
+  const t = (await ui.ask(C.bamboo('  ask your tutor ❯ '))).trim();
+  if (isStop(t)) return 'stop';
+  if (!t) return 'ok';
+  out(C.bamboo('  ❯ ') + t);
+  const about = q ? `They are looking at this question:\n${q.question}\n${letterList(q)}\n${revealed ? 'The correct option is ' + 'ABCD'[q.answer] + '.' : 'They have NOT answered yet: do not say or hint which option is correct.'}\n` : '';
+  await learnTeach(c, L, signal, `${about}The learner says: "${t}"\nRespond to exactly that.`);
+  return 'ok';
+}
+// Asks one question and handles the answer. Returns 'next' or 'stop'.
+async function learnRound(c, L, q, signal, exam = false) {
+  learnShow(q);
+  let choice;
+  for (;;) {
+    const items = q.options.map((o, i) => ({ label: `${'ABCD'[i]}) ${o}` })).concat(exam ? [{ label: 'Stop the test' }] : [{ label: 'Teach me this' }, { label: 'Ask something' }, { label: 'Skip this question' }, { label: 'Stop and save' }]);
+    const p = await ui.select('  ' + C.bold('Your answer') + C.gray('  (A-D, or arrows)'), items, { letters: 4, plain: true });
+    if (p < 0 || p === items.length - 1) return 'stop';
+    if (p < 4) { choice = p; break; }
+    if (p === 4) { // teach me this: explain, then test with a fresh question
+      await learnTeach(c, L, signal, `The learner asked you to teach them what they need for this question, without telling them which option is correct:\n${q.question}\n${letterList(q)}`);
+      const g = await ui.select('  ' + C.bold('Ready?'), [{ label: 'Quiz me on it' }, { label: 'Explain it more simply' }, { label: 'Ask something' }, { label: 'Stop and save' }]);
+      if (g === 1) await learnTeach(c, L, signal, `Explain the idea behind this question again, much more simply and with a new everyday example, without telling them which option is correct:\n${q.question}\n${letterList(q)}`);
+      else if (g === 2) { if (await learnTyped(c, L, q, signal, false) === 'stop') return 'stop'; }
+      else if (g < 0 || g === 3) return 'stop';
+      L.asked.push(q.question); return 'next';
+    }
+    if (p === 5) { if (await learnTyped(c, L, q, signal, false) === 'stop') return 'stop'; learnShow(q); continue; }
+    L.asked.push(q.question); return 'next'; // skip
+  }
+  L.asked.push(q.question); if (L.asked.length > 20) L.asked.shift();
+  const right = choice === q.answer;
+  out(C.gray('  you chose ') + 'ABCD'[choice]);
+  if (right) { L.correct++; L.streak++; out(C.green('  ✓ Correct.') + ' ' + inline(q.explanation)); }
+  else { L.wrong++; L.streak = 0; out(C.red('  ✗ Not quite.') + C.gray(' The answer is ') + C.bold('ABCD'[q.answer] + ') ') + inline(q.options[q.answer])); }
+  if (exam) { learnSave(c); return right ? 'right' : 'wrong'; }
+  const justMastered = right && !L.mastered && L.streak >= LEARN_NEED;
+  if (justMastered) { L.mastered = true; out(C.bamboo(`  🎋 Lesson mastered: ${L.name}`)); }
+  learnSave(c);
+  if (!right) await learnTeach(c, L, signal, `The learner answered this question wrongly.\nQuestion: ${q.question}\nOptions:\n${letterList(q)}\nThey chose ${'ABCD'[choice]}; the correct one is ${'ABCD'[q.answer]}. Explain why their choice is wrong and why the right one is right, then teach the underlying idea with one example.`);
+  for (;;) {
+    const f = await ui.select('  ' + C.bold('What next?'), [{ label: 'Next question' }, { label: right ? 'Teach me this' : 'Explain it differently' }, { label: 'Ask something' }, { label: 'I think that answer is wrong' }, { label: 'Stop and save' }]);
+    if (f === 0) return 'next';
+    if (f < 0 || f === 4) return 'stop';
+    if (f === 1) await learnTeach(c, L, signal, `${right ? 'Teach the idea behind this question properly' : 'Explain this again in a completely different, simpler way, with a new example'}:\n${q.question}\n${letterList(q)}\nCorrect option: ${'ABCD'[q.answer]}.`);
+    if (f === 2 && await learnTyped(c, L, q, signal, true) === 'stop') return 'stop';
+    if (f === 3 && q.challenged) { out(C.gray('  ⎿  Already re-checked. Use "Ask something" to talk it through.')); continue; }
+    if (f === 3) { // challenge: a slower, careful re-check with thinking switched on
+      q.challenged = true;
+      const v = await learnJSON('You are a meticulous examiner settling a disputed question. Work it out carefully from first principles. Give your reasoning in under 120 words, then the index (0-3) of the correct option, or -1 if the question is broken.', `${q.question}\n${optionList(q)}`, CHECK_SHAPE, signal, 'Re-checking carefully', true);
+      const a = Number(v.answer);
+      out(''); out('  ' + inline(String(v.reasoning || '')));
+      if (a === q.answer) out(C.gray('  ⎿  Checked again: the answer stays ') + C.bold('ABCD'[a]) + C.gray('. If you still disagree, ask me why.'));
+      else {
+        out(C.yellow(`  ⎿  You may be right: on a careful re-check ${a >= 0 && a < 4 ? 'the answer is ' + 'ABCD'[a] : 'this question is broken'}. It will not count against you.`));
+        if (!right) { L.wrong = Math.max(0, L.wrong - 1); if (a === choice) { L.correct++; L.streak++; if (L.streak >= LEARN_NEED) L.mastered = true; } }
+        else { L.correct = Math.max(0, L.correct - 1); L.streak = 0; L.mastered = false; }
+        q.answer = a >= 0 && a < 4 ? a : q.answer; learnSave(c);
+      }
+    }
+  }
+}
+// A mixed test over every lesson; lessons you miss go back into practice.
+async function learnExam(c, signal) {
+  const set = c.lessons.slice(0, 10); let score = 0, done = 0;
+  for (const L of set) {
+    out(''); out(C.bold(C.bamboo(`  Final test ${done + 1}/${set.length}`)) + C.gray(' · ' + L.name));
+    const r = await learnRound(c, L, await learnQuestion(c, L, signal), signal, true);
+    if (r === 'stop') break;
+    done++; if (r === 'right') score++; else { L.mastered = false; L.streak = 0; }
+    learnSave(c);
+  }
+  if (done) out('\n' + C.bold(`  Test score: ${score}/${done}`) + C.gray(score === done ? '  · excellent' : '  · the ones you missed are back in your practice list (/learn to continue)'));
+}
+async function learnRun(c, signal) {
+  for (;;) {
+    const i = c.lessons.findIndex(l => !l.mastered);
+    if (i < 0) {
+      out('\n' + C.bold(C.bamboo(`  🎉 You have mastered all ${c.lessons.length} lessons of ${c.topic} (${c.level}).`)));
+      const g = await ui.select('  ' + C.bold('What now?'), [{ label: 'Take a final mixed test' }, { label: 'Done for now' }]);
+      if (g === 0) await learnExam(c, signal);
+      return;
+    }
+    const L = c.lessons[i];
+    out(''); out(C.bold(C.bamboo(`  Lesson ${i + 1}/${c.lessons.length}`)) + C.white(' · ' + L.name) + '  ' + learnDots(L));
+    if (!L.asked.length && L.goal) out(C.gray('  ' + L.goal));
+    const r = await learnRound(c, L, await learnQuestion(c, L, signal), signal);
+    learnSave(c);
+    if (r === 'stop') return;
+  }
+}
+async function learnCmd(arg) {
+  const a = String(arg || '').trim();
+  if (!state.interactive) return;
+  if (a.toLowerCase() === 'list') {
+    const cs = learnCourses();
+    if (!cs.length) out(C.gray('  No courses yet. Try:  /learn python to beginner'));
+    for (const c of cs) out(`  ${C.bamboo('●')} ${c.topic} ${C.gray('(' + c.level + ') · ' + learnProgress(c))}`);
+    return;
+  }
+  let course = null, request = a;
+  if (!request) {
+    const cs = learnCourses().slice(0, 8);
+    if (cs.length) {
+      const i = await ui.select('  ' + C.bold('Continue learning'), cs.map(c => ({ label: `${c.topic} (${c.level})`, desc: C.gray(learnProgress(c)) })).concat([{ label: 'Start something new' }]));
+      if (i < 0) return;
+      course = cs[i] || null;
+    }
+    if (!course) { request = (await ui.ask(C.bamboo('  What do you want to learn, and to what level? ❯ '))).trim(); if (!request || isStop(request)) return; }
+  }
+  const ac = new AbortController(); ui.abort = ac;
+  try {
+    if (!course) {
+      let { topic, level } = parseLearn(request);
+      if (!topic) return;
+      const same = learnCourses().filter(c => c.topic.toLowerCase() === topic.toLowerCase());
+      if (!level) {
+        const levels = ['Beginner', 'Intermediate', 'Advanced', 'Expert'];
+        const i = await ui.select('  ' + C.bold(`What level do you want to reach in ${topic}?`), same.map(c => ({ label: `Continue: ${c.level}`, desc: C.gray(learnProgress(c)) })).concat(levels.map(l => ({ label: l })), [{ label: 'Something else…' }]));
+        if (i < 0) return;
+        if (i < same.length) course = same[i];
+        else level = levels[i - same.length] || (await ui.ask(C.bamboo('  target level ❯ '))).trim();
+        if (!course && (!level || isStop(level))) return;
+      }
+      if (!course) course = same.find(c => c.level.toLowerCase() === level.toLowerCase()) || null;
+      if (!course) {
+        course = await learnPlan(topic, level, ac.signal); learnSave(course);
+        out(''); out(C.bold(`  Your course: ${course.topic}`) + C.gray(` · target: ${course.level}`));
+        course.lessons.forEach((l, i) => out(`   ${C.bamboo(String(i + 1).padStart(2) + '.')} ${l.name}`));
+        out(C.gray(`  Get ${LEARN_NEED} right in a row to master a lesson. Progress is saved; /learn continues any time.`));
+      } else out(C.gray(`  Continuing ${course.topic} (${course.level}) · ${learnProgress(course)}`));
+    }
+    await learnRun(course, ac.signal);
+    out(C.gray('  ⎿  Progress saved. /learn to continue.'));
+  } catch (e) {
+    if (e.name === 'AbortError' || ac.signal.aborted) out(C.gray('  ⎿  Paused. Your progress is saved; /learn to continue.'));
+    else out(C.red('  ' + (e.message || e)));
+    if (course) learnSave(course);
+  } finally { spinner.stop(); ui.abort = null; }
+}
 async function setupProvider(force) {
   if (!force && state.baseUrl) return true;
   out(C.gray('  Looking for local AI servers…'));
@@ -2800,6 +3047,7 @@ ${C.bold('Commands')}
   ${C.bamboo('/imagine')} <prompt>  Generate an image with a local image model ${C.gray('(--size 1024x1024 --steps 30 --seed 7 --neg "blurry" --enhance)')}
   ${C.bamboo('/undo')}              Roll back the file changes Panda made in its last request
   ${C.bamboo('/discord')}           Let people @mention Panda on Discord and get replies from the current model ${C.gray('(/discord setup · on · off · status)')}
+  ${C.bamboo('/learn')} <topic> to <level>  Learn almost anything: multiple-choice quizzes, teaching when you miss one, saved progress ${C.gray('(/learn · /learn list)')}
   ${C.bamboo('/doctor')}            Check what context Ollama really gives the model, and how to fix "truncating input prompt" / the AI stopping
   ${C.bamboo('/update')}            Check for a newer Panda Code and install it ${C.gray('(also: pandacode update)')}
   ${C.bamboo('/think')} on|off|auto|show|hide   Model thinking & whether to display it
@@ -2831,6 +3079,7 @@ async function slash(text) {
     case '/update': await updateCmd(arg); break;
     case '/doctor': await doctorCmd(); break;
     case '/discord': await discordCmd(arg); break;
+    case '/learn': await learnCmd(arg); break;
     case '/imagine': await imagineCmd(arg); break;
     case '/undo': { const d = undoLast(); out(d && d.length ? d.map(x => C.gray('  ⎿  ') + x).join('\n') + '\n' + C.gray('  (changes made through the shell are not tracked)') : C.gray('  Nothing to undo.')); break; }
     case '/mouse': {

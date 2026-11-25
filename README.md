@@ -56,6 +56,19 @@ On Linux and macOS the installer can apply the fix for you: `curl -fsSL https://
 3. `/discord off` turns it off. `/discord status` shows what it is doing.
 
 It is chat-only: people on Discord get no access to your files, shell or anything else on your PC. Each person can ask once every 10 seconds (`/discord cooldown <seconds>`), and `/discord channel <id>` limits it to one channel. With a webhook (`/discord webhook <url>`) you can also post announcements: `/discord say <text>`.
+## Learn mode
+
+```
+/learn python to beginner
+/learn spanish A2
+/learn organic chemistry to university level
+/learn                  (continue where you left off)
+/learn list
+```
+
+Panda plans a short course, then asks multiple-choice questions (press A-D). Get one wrong and it teaches you the idea. You can choose **Teach me this** before answering, **ask your tutor** anything, or challenge an answer you think is wrong, which makes it re-check carefully. Two right in a row masters a lesson, progress is saved, and a mixed final test sends missed lessons back into practice.
+
+Questions and explanations come from your local model, so they can be wrong. Panda has the model solve each question a second time without seeing the answer key and discards questions where the two disagree, but check anything important against a trusted source.
 ## Build and release (maintainers)
 
 ```powershell
