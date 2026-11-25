@@ -43,6 +43,24 @@ You can keep typing while Panda works; press Enter to queue the message.
 
 Say `remember that I prefer short answers` and Panda keeps it for every future conversation. It also saves lasting preferences you mention. `/memory` lists what it knows, `/memory forget 2` removes one, `/memory off` switches it off. It is stored in `~/.panda/memory.json`, and Panda refuses to store things that look like passwords or keys.
 
+## Effort
+
+`/effort` opens a menu, or name the level: `/effort high`. The setting is remembered.
+
+| Level | Thinks first | Checks changed files | Longest task | Told to |
+|---|---|---|---|---|
+| `low` | no | no | 60 steps | be quick and brief |
+| `medium` (default) | model's own setting | no | 150 steps | work normally |
+| `high` | yes | no | 150 steps | read before changing, and verify |
+| `ultra` | yes | up to 1 time | 200 steps | also plan and handle edge cases |
+| `extreme` | yes | up to 2 times | 300 steps | also compare alternatives and try to break it |
+| `overdrive` | yes | up to 3 times | 400 steps | also write and run tests |
+| `ultracode` | yes | up to 5 times | 600 steps | production quality, with nothing left unfinished |
+
+From `high` up, a single reply may also be longer when the context window is large enough. A check happens only after Panda edits files, and stops as soon as a pass changes nothing. With **ULTRACODE** on, the prompt and the line above it flow in rainbow colours.
+
+Higher levels are much slower. They make a local model take more care; they do not make it a bigger model. Thinking applies to Ollama models that support it. `/think` and `/fast` can still change thinking afterwards.
+
 ## Computer control (Windows)
 
 ```

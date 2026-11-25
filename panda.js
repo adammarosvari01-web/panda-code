@@ -13,7 +13,7 @@ const { StringDecoder } = require('string_decoder');
 const { setMaxListeners } = require('events'); // one Esc signal is shared by many steps of a long task
 const { Writable } = require('stream');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -35,6 +35,34 @@ const C = {
   bgDel: esc('48;2;80;25;30', '49'), bgAdd: esc('48;2;25;70;35', '49'),
 };
 const stripAnsi = s => String(s).replace(/\x1b\[[0-9;]*m/g, '');
+// Rainbow text, one colour per character, that flows along as `shift` grows (used by the ULTRACODE effort level).
+const letters = new Intl.Segmenter();
+const rainbowShift = () => Math.floor(Date.now() / 120) * 14;
+const hueRgb = h => [0, 8, 4].map(n => { const k = (n + h / 30) % 12; return Math.round(255 * (0.65 - 0.33 * Math.max(-1, Math.min(k - 3, 9 - k, 1)))); });
+function rainbow(text, shift = 0) {
+  if (!useColor) return String(text);
+  let out = '', i = 0;
+  for (const { segment } of letters.segment(String(text))) out += `\x1b[38;2;${hueRgb(((shift + i++ * 8) % 360 + 360) % 360).join(';')}m${segment}`;
+  return out + '\x1b[39m';
+}
+
+// ───────────────────────────── effort levels ─────────────────────────────
+// How hard Panda works on a request: whether the model thinks first, how long one reply and one task may be,
+// what it is told about care, and how many times it is sent back to check files it changed.
+const CAREFUL = 'Read the relevant code before changing it, and check your work (run the tests or the program) before saying it is done.';
+const PLANNED = CAREFUL + ' For anything with more than one step, plan with TodoWrite first. Handle edge cases and errors, not only the normal case.';
+const EFFORTS = {
+  low: { name: 'Low', about: 'quickest: no thinking, short answers', think: false, steps: 60, reviews: 0, output: 0, prompt: 'Be quick: do exactly what was asked with as few tool calls as possible, and answer briefly.' },
+  medium: { name: 'Medium', about: 'the normal setting', think: null, steps: 150, reviews: 0, output: 0, prompt: '' },
+  high: { name: 'High', about: 'thinks first and checks its work', think: true, steps: 150, reviews: 0, output: 24576, prompt: CAREFUL },
+  ultra: { name: 'Ultra', about: 'plans, and reviews changed files once', think: true, steps: 200, reviews: 1, output: 32768, prompt: PLANNED },
+  extreme: { name: 'Extreme', about: 'deeper checks, 2 reviews of changes', think: true, steps: 300, reviews: 2, output: 32768, prompt: PLANNED + ' Before choosing a solution, compare it with at least one alternative. Test what you changed, including inputs that could break it.' },
+  overdrive: { name: 'Overdrive', about: 'relentless: tests everything, 3 reviews', think: true, steps: 400, reviews: 3, output: 49152, prompt: PLANNED + ' Compare alternative solutions first. Write tests for what you change, run them, and fix every failure. Look for other places in the project that the change affects. Do not stop while anything is unfinished or untested.' },
+  ultracode: { name: 'ULTRACODE', about: 'maximum: production-grade coding, 5 reviews', think: true, steps: 600, reviews: 5, output: 65536, prompt: PLANNED + ' Work like a senior engineer shipping to production. Explore the project thoroughly first, using Task sub-agents for wide searches. Plan, then implement completely: no placeholders, stubs or "left as an exercise". Write tests, run them and fix every failure. Reread each change line by line looking for bugs, security problems and broken callers. Never say something works unless you saw it work, and report plainly what you could not check. Do not stop while anything is unfinished.' },
+};
+const EFFORT_ALIAS = { lo: 'low', med: 'medium', normal: 'medium', default: 'medium', hi: 'high', extreeme: 'extreme', xtreme: 'extreme', over: 'overdrive', 'ultra-code': 'ultracode', max: 'ultracode' };
+const effortKey = s => { const k = String(s || '').toLowerCase().replace(/\s+/g, ''); return Object.hasOwn(EFFORTS, k) ? k : Object.hasOwn(EFFORT_ALIAS, k) ? EFFORT_ALIAS[k] : ''; };
+const effort = () => EFFORTS[state.effort] || EFFORTS.medium;
 const fmtK = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n);
 // Per-run context: the /btw side agent runs next to the main agent, with its own output sink, model and spinner.
 const als = new AsyncLocalStorage();
@@ -48,7 +76,7 @@ const SP = () => als.getStore()?.side ? NULLSP : spinner;
 const state = {
   cwd: process.cwd(),
   kind: 'ollama', baseUrl: '', apiKey: '', model: '', providerName: '',
-  numCtx: 32768, think: null, showThinking: false, keepAlive: '30m',
+  numCtx: 32768, think: null, showThinking: false, keepAlive: '30m', effort: 'medium', edits: 0, noThink: '',
   nativeTools: true,
   mode: 'default', // default | acceptEdits | plan | bypass
   allow: new Set(),
@@ -70,7 +98,7 @@ function newSession() {
 function loadConfig() { try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { return {}; } }
 function saveConfig() {
   fs.mkdirSync(HOME_DIR, { recursive: true });
-  const c = { kind: state.kind, baseUrl: state.baseUrl, apiKey: state.apiKey, model: state.model, providerName: state.providerName, numCtx: state.numCtx, think: state.think, showThinking: state.showThinking, keepAlive: state.keepAlive, pin: state.pin, mouse: state.mouse, imageUrl: state.imageUrl, imageKind: state.imageKind, repo: state.repo, computerScreen: state.computerScreen, computerRes: state.computerRes, computerKeepWindow: state.computerKeepWindow, gameMinutes: state.gameMinutes, gameSens: state.gameSens };
+  const c = { kind: state.kind, baseUrl: state.baseUrl, apiKey: state.apiKey, model: state.model, providerName: state.providerName, numCtx: state.numCtx, think: state.think, showThinking: state.showThinking, keepAlive: state.keepAlive, pin: state.pin, mouse: state.mouse, imageUrl: state.imageUrl, imageKind: state.imageKind, repo: state.repo, computerScreen: state.computerScreen, computerRes: state.computerRes, computerKeepWindow: state.computerKeepWindow, gameMinutes: state.gameMinutes, gameSens: state.gameSens, effort: state.effort };
   fs.writeFileSync(CONFIG_PATH, JSON.stringify(c, null, 2));
 }
 
@@ -249,6 +277,7 @@ const spinner = {
       if (dispW(prompt) >= cols - 4) prompt = C.bamboo('❯ ');
       let input = prompt + typed;
       if (dispW(input) >= cols) { do typed = typed.slice(1); while (typed && dispW(prompt + '…' + typed) >= cols); input = prompt + '…' + typed; }
+      if (state.effort === 'ultracode') input = rainbow(stripAnsi(input), rainbowShift());
       buf += '\n' + input; this.drawn++;
     }
     process.stdout.write(buf);
@@ -1733,6 +1762,7 @@ async function executeTool(call, ctx) {
   if (spin && !SP().t) SP().start(call.name === SHELL_TOOL ? 'Running' : VERBS[Math.floor(Math.random() * VERBS.length)]);
   try {
     const r = await tool.run(a, ctx);
+    if (['Write', 'Edit', 'MultiEdit'].includes(call.name) && !/^<tool_use_error>|^Error:/.test(String(r.content))) state.edits++;
     if ((call.name === 'Write' || call.name === 'Edit' || call.name === 'MultiEdit') && a.file_path) { // catch broken code immediately
       const sc = syntaxCheck(abs(a.file_path));
       if (sc) { r.content += sc; r.display = (r.display || '') + '\n' + C.red(sc.trim().split('\n')[0]); }
@@ -1767,6 +1797,8 @@ function fallbackMessages(msgs) {
     return m;
   });
 }
+// the most one reply may write: higher effort levels leave more room, never more than most of the context
+const replyLimit = () => Math.max(Math.min(16384, Math.max(4096, Math.floor(state.numCtx * 0.3))), Math.min(effort().output, Math.floor(state.numCtx * 0.6)));
 async function* streamOllama({ system, messages, tools, signal }) {
   const msgs = [{ role: 'system', content: system }];
   const src = tools ? messages : fallbackMessages(messages);
@@ -1776,10 +1808,10 @@ async function* streamOllama({ system, messages, tools, signal }) {
     else msgs.push(m.images?.length ? { role: m.role, content: m.content, images: m.images.map(i => i.data) } : { role: m.role, content: m.content });
   }
   // keep_alive: keep the model in VRAM between turns (Ollama's default unloads it after 5 idle minutes).
-  const body = { model: curModel(), messages: msgs, stream: true, keep_alive: state.keepAlive, options: { num_ctx: als.getStore()?.ctxSize ?? state.numCtx, num_predict: als.getStore()?.numPredict ?? Math.min(16384, Math.max(4096, Math.floor(state.numCtx * 0.3))) } };
+  const body = { model: curModel(), messages: msgs, stream: true, keep_alive: state.keepAlive, options: { num_ctx: als.getStore()?.ctxSize ?? state.numCtx, num_predict: als.getStore()?.numPredict ?? replyLimit() } };
   if (tools) body.tools = toolSpecs(tools);
   if (als.getStore()?.format) body.format = als.getStore().format; // structured JSON output (used by /learn)
-  { const th = als.getStore()?.think !== undefined ? als.getStore().think : state.think; if (th !== null && th !== undefined) body.think = th; }
+  { const th = als.getStore()?.think !== undefined ? als.getStore().think : state.think; if (th !== null && th !== undefined && !(th && state.noThink === body.model)) body.think = th; }
   const res = await fetch(state.baseUrl.replace(/\/+$/, '') + '/api/chat', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body), signal });
   if (!res.ok) throw new Error(`Ollama ${res.status}: ${(await res.text()).slice(0, 500)}`);
   let n = 0;
@@ -1929,6 +1961,7 @@ Model: ${curModel()}${projectSnapshot(opts)}`;
   if (state.mode === 'plan' && !opts.sub) s += `\n\n# PLAN MODE IS ACTIVE\nThe user wants a plan before any changes. You MUST NOT edit files, write files or run commands that change anything. Research with read-only tools (Read, Glob, Grep, LS, WebFetch, WebSearch), then call ExitPlanMode with a concise plan. Do not make changes until the plan is approved.`;
   if (opts.sub) s += `\n\n# Sub-agent\nYou are a sub-agent launched to complete one task. Work autonomously with your tools, then reply with a single, complete final report of your findings or results (include file paths and key details). The report is returned to the main agent, not the user.`;
   const pi = projectInstructions();
+  if (!opts.sub && effort().prompt) s += `\n\n# Effort level: ${effort().name}\n${effort().prompt}`;
   if (!opts.sub) s += '\n\n# Video and audio\nTo edit or inspect video and sound files use the VideoInfo, VideoFrames and VideoRender tools, not shell commands. Look at a file with VideoInfo before cutting it, never invent file names, and say where the result was saved.';
   if (!opts.sub) s += memoryPrompt();
   if (!opts.sub && IS_WIN) s += '\n\n# Controlling the computer\n' + (state.mode === 'bypass'
@@ -1994,7 +2027,9 @@ async function modelTurn(messages, opts) {
 }
 async function agentLoop(messages, opts) {
   let overflow = 0, cont = 0, trunc = 0, empty = 0; const fails = new Map();
-  for (let step = 0; step < 150; step++) {
+  const level = effort(), limit = opts.depth === 0 ? level.steps : 150;
+  let reviews = 0, editsSeen = state.edits;
+  for (let step = 0; step < limit; step++) {
     if (opts.depth === 0) await maybeCompact(opts);
     let r;
     try { r = await modelTurn(messages, opts); }
@@ -2002,6 +2037,12 @@ async function agentLoop(messages, opts) {
       if (curNative() && /does not support tools|tool.*not supported|tools.*unsupported|"tools".*(unknown|invalid)/i.test(e.message || '')) {
         setNative(false);
         out(C.yellow(`  ⚠ ${state.model} has no native tool calling — switching to text-based tool calls.`));
+        step--; continue;
+      }
+      // A high effort level asks the model to think first, which some models cannot do.
+      if (/does not support thinking|thinking is not supported/i.test(e.message || '') && state.noThink !== curModel()) {
+        state.noThink = curModel();
+        out(C.gray(`  ⎿  ${curModel()} has no thinking mode, so Panda carries on without it.`));
         step--; continue;
       }
       // The model can't take images: strip them from the conversation and carry on with the text.
@@ -2043,6 +2084,14 @@ async function agentLoop(messages, opts) {
         messages.push({ role: 'user', content: '[Your previous reply hit the output token limit and was cut off. Continue exactly where you stopped. Do not repeat anything.]' });
         continue;
       }
+      // Higher effort levels send the model back over files it changed, until a pass changes nothing or the passes run out.
+      if (opts.depth === 0 && reviews < level.reviews && state.edits > editsSeen && !opts.signal.aborted) {
+        reviews++; editsSeen = state.edits;
+        const note = `  ✻ ${level.name}: checking the work (review ${reviews} of up to ${level.reviews})`;
+        out(state.effort === 'ultracode' ? rainbow(note) : C.gray(note));
+        messages.push({ role: 'user', content: `[Panda self-review ${reviews} of up to ${level.reviews}: check the work you just did against my request. Reread the files you changed, run the tests or the program, and fix anything that is wrong, missing or untested. If it is all correct, say so briefly and change nothing.]` });
+        continue;
+      }
       return r.text;
     }
     let stop = false; const imgs = [];
@@ -2062,7 +2111,7 @@ async function agentLoop(messages, opts) {
     if (stop) { if (opts.depth === 0) out(C.gray('  ⎿  ') + C.yellow('What should Panda do instead?')); return null; }
     if (opts.depth === 0 && !SP().t) SP().start();
   }
-  out(C.yellow('  ⚠ Stopped after 150 steps.'));
+  out(C.yellow(`  ⚠ Stopped after ${limit} steps.`));
   return null;
 }
 
@@ -2103,7 +2152,7 @@ function hardTrim(msgs, target = 0.5) {
   while (msgs.length > 1 && msgs[0].role !== 'user') msgs.shift();
 }
 function lastUserRequest(msgs) {
-  for (let i = msgs.length - 1; i >= 0; i--) { const m = msgs[i]; if (m.role === 'user' && !/^\[(Request interrupted|previous request failed|Your previous reply)/.test(m.content || '') && !/^\(Earlier conversation was compacted/.test(m.content || '')) return m.content; }
+  for (let i = msgs.length - 1; i >= 0; i--) { const m = msgs[i]; if (m.role === 'user' && !/^\[(Request interrupted|previous request failed|Your previous reply|Your last reply|Panda self-review)/.test(m.content || '') && !/^\(Earlier conversation was compacted/.test(m.content || '')) return m.content; }
   return '';
 }
 // Keeps the conversation inside the context window so nothing is silently dropped by the server.
@@ -2348,7 +2397,7 @@ async function handleBtw(arg) {
   askSide(a).catch(e => out(C.red('  ⎿  ' + (e.message || e)))); // runs in the background; the main prompt stays free
 }
 
-const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/bypasspermissions', '/computer', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/discord', '/learn', '/video', '/play', '/copy', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
+const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/bypasspermissions', '/computer', '/ctx', '/effort', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/discord', '/learn', '/video', '/play', '/copy', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
 const ui = {
   ghost: '', skipTab: false, menuLines: null, inSelect: false,
   rl: null, pending: null, queue: [], busy: false, lines: [], timer: null, cont: '', lastSig: 0, abort: null, handler: null,
@@ -2391,15 +2440,29 @@ const ui = {
   },
   promptStr() {
     const tag = state.mode === 'acceptEdits' ? C.pink('⏵⏵ edits ') : state.mode === 'plan' ? C.cyan('⏸ plan ') : state.mode === 'bypass' ? C.red('⚠ bypass ') : '';
-    return tag + (pendingImages.length ? C.cyan(`📎${pendingImages.length} `) : '') + C.bamboo('❯ ');
+    const all = tag + (pendingImages.length ? C.cyan(`📎${pendingImages.length} `) : '') + C.bamboo('❯ ');
+    return state.effort === 'ultracode' ? rainbow(stripAnsi(all), rainbowShift()) : all;
   },
-  dividerStr() {
-    const w = Math.min((process.stdout.columns || 80) - 1, 139);
-    if (this.flash && Date.now() < this.flash.until) { const f = ` ${this.flash.msg} `; return C.ink('──') + C.leaf(f) + C.ink('─'.repeat(Math.max(0, w - 2 - f.length))); }
-    const used = session.messages.length ? Math.max(state.lastPrompt, estimateTokens(session.messages)) : 0;
-    const pct = Math.min(100, Math.round(100 * used / state.numCtx));
-    const info = ` ${state.model} · ${pct}% ctx${state.lastTps ? ` · ${state.lastTps.toFixed(0)} tok/s` : ''} `;
-    return C.ink('──') + C.gray(info) + C.ink('─'.repeat(Math.max(0, w - 2 - info.length)));
+  // The line above the prompt. `again` redraws it for the rainbow animation without measuring the conversation afresh.
+  dividerStr(again) {
+    const w = Math.min((process.stdout.columns || 80) - 1, 139), ultra = state.effort === 'ultracode';
+    const line = (text, color) => ultra
+      ? rainbow(('──' + text + '─'.repeat(Math.max(0, w - 2 - text.length))).slice(0, Math.max(0, w)), rainbowShift())
+      : C.ink('──') + color(text) + C.ink('─'.repeat(Math.max(0, w - 2 - text.length)));
+    if (this.flash && Date.now() < this.flash.until) return line(` ${this.flash.msg} `, C.leaf);
+    if (!again || this.info === undefined) {
+      const used = session.messages.length ? Math.max(state.lastPrompt, estimateTokens(session.messages)) : 0;
+      const pct = Math.min(100, Math.round(100 * used / state.numCtx));
+      const level = state.effort === 'medium' ? '' : ` · ${ultra ? '★ ULTRACODE ★' : effort().name.toLowerCase() + ' effort'}`;
+      this.info = ` ${state.model}${level} · ${pct}% ctx${state.lastTps ? ` · ${state.lastTps.toFixed(0)} tok/s` : ''} `;
+    }
+    return line(this.info, C.gray);
+  },
+  // ULTRACODE colours what you have typed too. Returns the escape codes that repaint the prompt row, or '' if it spans rows.
+  rainbowInput() {
+    if (state.effort !== 'ultracode' || !useColor || !this.rl || this.pending || this.inSelect || scr.on || typeof this.rl.getPrompt !== 'function') return '';
+    const text = stripAnsi(this.rl.getPrompt()) + this.rl.line;
+    return this.rl.getCursorPos().rows === 0 && dispW(text) < (process.stdout.columns || 80) - 1 ? rainbow(text, rainbowShift()) : '';
   },
   prompt() {
     drawHeader();
@@ -2535,7 +2598,7 @@ const ui = {
       const sp = line.indexOf(' ');
       if (sp < 0) return pick(SLASH, line);
       const cmd = line.slice(0, sp).toLowerCase(), arg = line.slice(sp + 1);
-      const opts = { '/mode': ['default', 'acceptEdits', 'plan', 'bypass'], '/think': ['on', 'off', 'auto', 'show', 'hide'], '/pin': ['on', 'off'], '/mouse': ['on', 'off'], '/ctx': ['32768', '65536', '131072'], '/btw': ['agent', 'model', 'close', 'clear', 'refresh', 'stop'], '/discord': ['setup', 'on', 'off', 'status', 'server', 'token', 'webhook', 'say', 'channel', 'role', 'dm', 'cooldown', 'forget'], '/memory': ['add', 'forget', 'clear', 'on', 'off'], '/copy': ['code'], '/computer': ['screen', 'res', 'window'], '/video': ['setup', 'info', 'render'], '/play': ['minecraft', 'skills', 'skill', 'minutes', 'sensitivity'], '/model': state.modelNames || [] }[cmd];
+      const opts = { '/mode': ['default', 'acceptEdits', 'plan', 'bypass'], '/think': ['on', 'off', 'auto', 'show', 'hide'], '/effort': Object.keys(EFFORTS), '/pin': ['on', 'off'], '/mouse': ['on', 'off'], '/ctx': ['32768', '65536', '131072'], '/btw': ['agent', 'model', 'close', 'clear', 'refresh', 'stop'], '/discord': ['setup', 'on', 'off', 'status', 'server', 'token', 'webhook', 'say', 'channel', 'role', 'dm', 'cooldown', 'forget'], '/memory': ['add', 'forget', 'clear', 'on', 'off'], '/copy': ['code'], '/computer': ['screen', 'res', 'window'], '/video': ['setup', 'info', 'render'], '/play': ['minecraft', 'skills', 'skill', 'minutes', 'sensitivity'], '/model': state.modelNames || [] }[cmd];
       if (opts && !arg.includes(' ')) { const r = pick(opts, arg); if (r) return r; }
     }
     const at = line.match(/(^|\s)@([^\s]+)$/);
@@ -2552,10 +2615,16 @@ const ui = {
   drawGhost() {
     this.ghost = '';
     if (this.pending || this.inSelect || scr.on || !this.rl || (!hdr.on && spinner.t)) return;
-    const line = this.rl.line;
-    const full = line && this.rl.cursor === line.length ? this.suggest(line) : '';
+    const line = this.rl.line, at = this.rl.getCursorPos(), colored = this.rainbowInput();
+    if (colored) process.stdout.write('\r' + colored + '\r' + (at.cols ? `\x1b[${at.cols}C` : ''));
+    if (this.rl.cursor !== line.length) { // the cursor is inside the text: only wipe an old suggestion after its end, never the text
+      const end = dispW(stripAnsi(this.rl.getPrompt?.() || '') + line);
+      if (at.rows === 0 && end < (process.stdout.columns || 80) - 1) process.stdout.write(`\x1b7\r\x1b[${end}C\x1b[K\x1b8`);
+      return;
+    }
+    const full = line ? this.suggest(line) : '';
     this.ghost = full;
-    const room = (process.stdout.columns || 80) - this.rl.getCursorPos().cols - 2;
+    const room = (process.stdout.columns || 80) - at.cols - 2;
     const g = full.length > room ? full.slice(0, Math.max(0, room)) : full;
     process.stdout.write('\x1b[K' + (g ? '\x1b[2m\x1b[38;2;110;110;120m' + g + '\x1b[0m\x1b[' + g.length + 'D' : ''));
   },
@@ -5375,6 +5444,36 @@ async function playCmd(arg) {
   await runPlay('generic', text);
 }
 
+// ── /effort ──
+let rainbowTimer = null;
+// keeps the colours of the line above the prompt, and the prompt itself, flowing while ULTRACODE is on
+function syncRainbow() {
+  const on = state.effort === 'ultracode' && useColor && state.interactive;
+  if (on && !rainbowTimer) { rainbowTimer = setInterval(rainbowTick, 120); rainbowTimer.unref(); }
+  else if (!on && rainbowTimer) { clearInterval(rainbowTimer); rainbowTimer = null; }
+}
+function rainbowTick() {
+  if (!hdr.on || scr.on || !ui.rl) return; // without the pinned layout there is no fixed row to repaint
+  const rows = process.stdout.rows || 24, typed = ui.rainbowInput();
+  process.stdout.write(`\x1b7\x1b[${rows - 1};1H${ui.dividerStr(true)}\x1b[0m\x1b[K${typed ? `\x1b[${rows};1H${typed}` : ''}\x1b8`);
+}
+function setEffort(key) {
+  const e = EFFORTS[key];
+  state.effort = key; state.think = e.think; saveConfig(); syncRainbow();
+  out(key === 'ultracode' ? rainbow(`  ★ ULTRACODE ★ ${e.about}`) : C.gray('  ⎿  Effort: ') + C.bamboo(e.name) + C.gray(` — ${e.about}`));
+  if (key === 'ultracode' || key === 'overdrive') out(C.gray('  Expect long waits. The model takes more care; it does not become a bigger one.'));
+}
+async function effortCmd(arg) {
+  const keys = Object.keys(EFFORTS);
+  if (String(arg || '').trim()) {
+    const k = effortKey(arg);
+    if (!k) { out(C.yellow('  Usage: /effort ' + keys.join('|'))); return; }
+    setEffort(k); return;
+  }
+  const i = await ui.select('  ' + C.bold('How hard should Panda work?'), keys.map(k => ({ label: EFFORTS[k].name, desc: C.gray(EFFORTS[k].about) })), { current: Math.max(0, keys.indexOf(state.effort)) });
+  if (i >= 0) setEffort(keys[i]);
+}
+
 const HELP = () => `
 ${C.bold(C.bamboo('Panda Code'))} ${C.gray('— terminal coding agent for local AI')}
 
@@ -5391,6 +5490,7 @@ ${C.bold('Commands')}
   ${C.bamboo('/video')} <request>    Edit video: cut, speed, colour, green screen, titles, music ${C.gray('(setup · info <file> · render <timeline.json>)')}
   ${C.bamboo('/play')} <game> <goal>  Panda plays a game that is open, such as Minecraft ${C.gray('(or say "play minecraft and ..."; skill · minutes · sensitivity; Esc stops)')}
   ${C.bamboo('/ctx')} [tokens]      Context window size (Ollama num_ctx), now ${state.numCtx}
+  ${C.bamboo('/effort')} [level]    How hard Panda works: low · medium · high · ultra · extreme · overdrive · ${rainbow('ULTRACODE')} ${C.gray('(higher = slower)')}
   ${C.bamboo('/fast')}              Toggle fast mode (turns model thinking off — much quicker replies)
   ${C.bamboo('/pin')} [on|off]      Keep the panda banner pinned to the top of the window
   ${C.bamboo('/mouse')} [on|off]    Mouse: drag to copy clean text, right-click to paste, wheel to scroll
@@ -5490,6 +5590,7 @@ async function slash(text) {
     case '/video': await videoCmd(arg); break;
     case '/play': await playCmd(arg); break;
     case '/ctx': { const n = parseInt(arg.replace(/k$/i, '000'), 10); if (n >= 2048) { state.numCtx = n; saveConfig(); warmModel(); } out(C.gray('  ⎿  Context window: ') + C.bamboo(state.numCtx) + C.gray(' tokens')); break; }
+    case '/effort': await effortCmd(arg); break;
     case '/fast': {
       // Thinking models spend many tokens reasoning before every reply; turning it off is the biggest speed win.
       state.think = state.think === false ? null : false; saveConfig();
@@ -5509,7 +5610,7 @@ async function slash(text) {
     case '/todos': out(state.todos.length ? renderTodos().split('\n').map(l => '  ' + l).join('\n') : C.gray('  No todos.')); break;
     case '/cost': case '/usage': out(C.gray(`  Tokens this session: ${fmtK(state.totalIn)} in · ${fmtK(state.totalOut)} out · context ${fmtK(state.lastPrompt)}/${fmtK(state.numCtx)} · last ${state.lastTps.toFixed(1)} tok/s · cost: $0.00 🐼`)); break;
     case '/status': case '/config':
-      out(`  ${C.gray('Version')}   ${VERSION}\n  ${C.gray('Server')}    ${state.providerName} (${state.kind}) ${state.baseUrl}\n  ${C.gray('Model')}     ${state.model}${state.nativeTools ? '' : C.yellow(' [text tool calls]')}\n  ${C.gray('Context')}   ${state.numCtx}\n  ${C.gray('Mode')}      ${state.mode}\n  ${C.gray('Cwd')}       ${state.cwd}\n  ${C.gray('Config')}    ${CONFIG_PATH}\n  ${C.gray('Allowed')}   ${[...state.allow].join(', ') || '-'}`);
+      out(`  ${C.gray('Version')}   ${VERSION}\n  ${C.gray('Server')}    ${state.providerName} (${state.kind}) ${state.baseUrl}\n  ${C.gray('Model')}     ${state.model}${state.nativeTools ? '' : C.yellow(' [text tool calls]')}\n  ${C.gray('Context')}   ${state.numCtx}\n  ${C.gray('Mode')}      ${state.mode}\n  ${C.gray('Effort')}    ${effort().name}\n  ${C.gray('Cwd')}       ${state.cwd}\n  ${C.gray('Config')}    ${CONFIG_PATH}\n  ${C.gray('Allowed')}   ${[...state.allow].join(', ') || '-'}`);
       break;
     case '/tools': for (const [n, t] of Object.entries(TOOLS)) out(`  ${C.bamboo(n.padEnd(16))} ${C.gray(t.description.split('. ')[0])}`); break;
     case '/bashes': if (!state.shells.size) out(C.gray('  No background shells.')); for (const s of state.shells.values()) out(`  ${C.bamboo(s.id)} ${s.status} ${C.gray(s.command)}`); break;
@@ -5628,7 +5729,7 @@ Env: PANDA_URL, PANDA_MODEL, PANDA_API_KEY, OLLAMA_HOST`);
   Object.assign(state, {
     kind: cfg.kind || 'ollama', baseUrl: cfg.baseUrl || '', apiKey: cfg.apiKey || '', model: cfg.model || '', providerName: cfg.providerName || 'Custom',
     numCtx: cfg.numCtx || 32768, think: cfg.think ?? null, showThinking: !!cfg.showThinking, keepAlive: cfg.keepAlive || '30m', pin: cfg.pin, mouse: cfg.mouse, imageUrl: cfg.imageUrl, imageKind: cfg.imageKind, repo: cfg.repo,
-    computerScreen: cfg.computerScreen || 'primary', computerRes: cfg.computerRes || 480, computerKeepWindow: !!cfg.computerKeepWindow, gameMinutes: cfg.gameMinutes || 10, gameSens: cfg.gameSens || 100,
+    computerScreen: cfg.computerScreen || 'primary', computerRes: cfg.computerRes || 480, computerKeepWindow: !!cfg.computerKeepWindow, gameMinutes: cfg.gameMinutes || 10, gameSens: cfg.gameSens || 100, effort: effortKey(cfg.effort) || 'medium',
   });
   if (args._[0] === 'doctor') { await doctorCmd(); process.exit(0); }
   if (args._[0] === 'update') { await updateCmd(args._.slice(1).join(' '), { headless: true }); process.exit(0); }
@@ -5695,6 +5796,7 @@ Env: PANDA_URL, PANDA_MODEL, PANDA_API_KEY, OLLAMA_HOST`);
   }
   saveConfig();
   if (pinHeader()) out(hdr.tip); else out(banner());
+  syncRainbow(); // ULTRACODE was left on last time
   if (args.cont) { const l = listSessions().find(s => s.cwd === state.cwd) || listSessions()[0]; if (l) { loadSession(l); out(C.gray(`  ⎿  Continuing conversation (${session.messages.length} messages)`)); } }
   else if (args.resume) await slash('/resume');
   ui.busy = false;
