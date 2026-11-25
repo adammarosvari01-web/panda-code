@@ -13,7 +13,7 @@ const { StringDecoder } = require('string_decoder');
 const { setMaxListeners } = require('events'); // one Esc signal is shared by many steps of a long task
 const { Writable } = require('stream');
 
-const VERSION = '1.1.1';
+const VERSION = '1.2.0';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -77,71 +77,160 @@ function saveConfig() {
 // ───────────────────────────── output / spinner ─────────────────────────────
 const VERBS = ['Munching bamboo', 'Chewing', 'Rolling around', 'Foraging', 'Pondering', 'Snacking', 'Climbing', 'Nibbling', 'Panda-ing', 'Somersaulting', 'Sniffing around', 'Lounging', 'Bamboozling', 'Cuddling the code', 'Napping on it', 'Crunching shoots'];
 const FRAMES = ['◐', '◓', '◑', '◒'];
-// ── animated panda: sits at the right edge of the terminal while Panda works, munching a bamboo stalk ──
-const SPR = { K: [58, 58, 66], W: [245, 245, 245], P: [240, 150, 180], G: [96, 180, 76], L: [170, 222, 120], D: [60, 128, 60] };
-const SPR_W = 20, SPR_H = 8;
-function munchGrid(len, open) {
-  const g = Array.from({ length: SPR_H }, () => Array(SPR_W).fill('.'));
-  const put = (y, x, c) => { if (y >= 0 && y < SPR_H && x >= 0 && x < SPR_W) g[y][x] = c; };
-  ['KK........KK', 'KKWWWWWWWWKK', '.WWWWWWWWWW.', '.WKKKWWKKKW.', '.WKWKWWKWKW.', '.WWWWKKWWWW.', '..WWWWWWWW..', '...WWWWWW...']
-    .forEach((r, y) => [...r].forEach((c, x) => { if (c !== '.') put(y, x, c); }));
-  if (open) { put(6, 4, 'K'); put(6, 5, 'P'); put(6, 6, 'P'); put(6, 7, 'K'); } // mouth open
-  for (let x = 9; x < 9 + len && x < SPR_W; x++) { put(5, x, 'L'); put(6, x, (x - 9) % 4 === 3 ? 'D' : 'G'); } // the bamboo
-  put(6, 8, 'K'); put(7, 8, 'K'); put(7, 9, 'K'); // paw holding it
-  return g;
+// ── the 3D panda: sits at the right edge while Panda works, turning around and munching a bamboo stalk ──
+// A tiny ray tracer. The panda is built from ellipsoids; every frame is lit and drawn with half-block characters
+// (two square "pixels" per character cell), then cached, so it costs next to nothing after the first loop.
+const P3_LOOP = 80;               // frames in one loop: it sways while chewing, then turns all the way round
+const P3_SIZES = [18, 15, 12, 9, 7]; // heights in text rows (the width is twice the height)
+const P3 = { white: [244, 243, 238], black: [72, 72, 88], pink: [240, 150, 172], pad: [168, 120, 134], eye: [250, 250, 252], pupil: [12, 12, 18], nose: [26, 22, 30], mouth: [120, 36, 52], cane: [110, 188, 76], joint: [64, 132, 52], leaf: [160, 220, 100] };
+function p3Scene(f) {
+  const prims = [];
+  // an ellipsoid at (x, y, z) with radii (rx, ry, rz), optionally tilted by `roll` degrees
+  const ball = (x, y, z, rx, ry, rz, color, extra = {}) => { const a = (extra.roll || 0) * Math.PI / 180; prims.push({ x, y, z, rx, ry, rz, color, ca: Math.cos(a), sa: Math.sin(a), shine: !!extra.shine, band: extra.band }); };
+  const limb = (a, b, r0, r1, n, color) => { for (let i = 0; i < n; i++) { const t = i / (n - 1), r = r0 + (r1 - r0) * t; ball(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, r, r, r, color); } };
+  const chew = Math.floor(f / 2) % 2 === 0, dy = chew ? -0.028 : 0, blink = f % 37 < 2;
+  ball(0, -0.55, -0.02, 0.66, 0.64, 0.52, P3.white, { band: { above: 0.5, color: P3.black } }); // body with the black shoulders
+  ball(0, -0.82, -0.52, 0.16, 0.16, 0.16, P3.white); // tail
+  // head
+  ball(0, 0.42 + dy, 0, 0.62, 0.55, 0.54, P3.white);
+  for (const s of [-1, 1]) {
+    ball(s * 0.45, 0.9 + dy, -0.04, 0.21, 0.21, 0.13, P3.black);                       // ear
+    ball(s * 0.44, 0.89 + dy, 0.07, 0.09, 0.09, 0.05, P3.pad);                          // inner ear
+    ball(s * 0.235, 0.47 + dy, 0.455, 0.155, 0.2, 0.105, P3.black, { roll: s * -35 });  // eye patch
+    if (!blink) {
+      ball(s * 0.2, 0.5 + dy, 0.55, 0.078, 0.082, 0.068, P3.eye, { shine: true });
+      ball(s * 0.183, 0.492 + dy, 0.608, 0.043, 0.05, 0.037, P3.pupil);
+    } else ball(s * 0.2, 0.49 + dy, 0.56, 0.07, 0.014, 0.055, P3.pupil);
+    ball(s * 0.37, 0.26 + dy, 0.425, 0.095, 0.058, 0.055, P3.pink);                     // cheek
+  }
+  ball(0, 0.25 + dy, 0.45, 0.245, 0.18, 0.175, P3.white);                                // muzzle
+  ball(0, 0.325 + dy, 0.625, 0.135, 0.09, 0.07, P3.nose);
+  ball(0, 0.17 + dy * 2, 0.598, 0.09, chew ? 0.068 : 0.018, 0.042, P3.mouth);
+  // legs and paw pads
+  for (const s of [-1, 1]) {
+    ball(s * 0.47, -1.0, 0.28, 0.28, 0.23, 0.37, P3.black);
+    ball(s * 0.49, -1.03, 0.63, 0.13, 0.11, 0.05, P3.pad);
+    for (const t of [-1, 0, 1]) ball(s * 0.49 + t * 0.105, -0.87 - Math.abs(t) * 0.025, 0.585, 0.042, 0.042, 0.04, P3.pad);
+  }
+  // bamboo: the mouth end stays put and the stalk gets shorter bite by bite, then a fresh one appears
+  const len = 1 - (Math.floor(f / 8) % 10) * 0.058, top = [0.03, 0.15, 0.69], foot = [0.62, -0.86, 0.66];
+  const at = t => [top[0] + (foot[0] - top[0]) * t, top[1] + (foot[1] - top[1]) * t, top[2] + (foot[2] - top[2]) * t];
+  const n = Math.max(6, Math.round(22 * len));
+  for (let i = 0; i < n; i++) { const p = at(len * i / (n - 1)), j = i % 6 === 4, r = j ? 0.082 : 0.062; ball(p[0], p[1], p[2], r, j ? 0.05 : r, r, j ? P3.joint : P3.cane, j ? { roll: 30 } : {}); }
+  const end = at(len);
+  ball(end[0] + 0.17, end[1] + 0.05, end[2], 0.19, 0.055, 0.045, P3.leaf, { roll: 28 });
+  ball(end[0] + 0.12, end[1] - 0.12, end[2], 0.17, 0.048, 0.045, P3.leaf, { roll: -30 });
+  // arms reaching from the shoulders to the stalk
+  const hand = (t, ox) => { const p = at(t); return [p[0] + ox, p[1], p[2] + 0.02]; };
+  limb([-0.52, -0.16, 0.08], hand(Math.min(0.5, len - 0.14), -0.06), 0.19, 0.125, 8, P3.black);
+  limb([0.58, -0.18, 0.05], hand(Math.min(0.7, len - 0.02), 0.08), 0.19, 0.125, 8, P3.black);
+  return prims;
 }
-function sprRender(g) {
-  const fg = c => `\x1b[38;2;${SPR[c].join(';')}m`, bg = c => `\x1b[48;2;${SPR[c].join(';')}m`, R = '\x1b[0m';
-  const lines = [];
-  for (let y = 0; y < g.length; y += 2) {
-    let s = '';
-    for (let x = 0; x < g[y].length; x++) {
-      const t = g[y][x], b = g[y + 1][x];
-      if (t === '.' && b === '.') s += ' ';
-      else if (t === '.') s += fg(b) + '▄' + R;
-      else if (b === '.') s += fg(t) + '▀' + R;
-      else if (t === b) s += fg(t) + '█' + R;
-      else s += fg(t) + bg(b) + '▀' + R;
+// Pixels of one frame: an array of [r, g, b] or null (see-through), `size` x `size`.
+function p3Pixels(f, size) {
+  const sway = 56, turn = f < sway ? 30 * Math.sin(2 * Math.PI * f / sway) : 360 * (t => t * t * (3 - 2 * t))((f - sway) / (P3_LOOP - sway));
+  const yaw = turn * Math.PI / 180, pitch = 11 * Math.PI / 180;
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const toObj = (x, y, z) => { const y1 = y * cp + z * sp, z1 = -y * sp + z * cp; return [x * cy - z1 * sy, y1, x * sy + z1 * cy]; };
+  const toWorld = (x, y, z) => { const x1 = x * cy + z * sy, z1 = -x * sy + z * cy; return [x1, y * cp - z1 * sp, y * sp + z1 * cp]; };
+  const prims = p3Scene(f), d = toObj(0, 0, -1), span = 2.56, mid = -0.07;
+  // each ellipsoid's direction in its own space is the same for every ray in the frame
+  for (const q of prims) { q.dx = (d[0] * q.ca + d[1] * q.sa) / q.rx; q.dy = (-d[0] * q.sa + d[1] * q.ca) / q.ry; q.dz = d[2] / q.rz; q.a = q.dx * q.dx + q.dy * q.dy + q.dz * q.dz; }
+  const light = [-0.47, 0.62, 0.63];
+  const trace = (wx, wy) => {
+    const o = toObj(wx, wy, 5);
+    let best = Infinity, hit = null, hx = 0, hy = 0, hz = 0;
+    for (const q of prims) {
+      const px = o[0] - q.x, py = o[1] - q.y, ox = (px * q.ca + py * q.sa) / q.rx, oy = (-px * q.sa + py * q.ca) / q.ry, oz = (o[2] - q.z) / q.rz;
+      const b = ox * q.dx + oy * q.dy + oz * q.dz, disc = b * b - q.a * (ox * ox + oy * oy + oz * oz - 1);
+      if (disc <= 0) continue;
+      const t = (-b - Math.sqrt(disc)) / q.a;
+      if (t > 0 && t < best) { best = t; hit = q; hx = ox + t * q.dx; hy = oy + t * q.dy; hz = oz + t * q.dz; }
     }
-    lines.push(s);
+    if (!hit) { // the soft shadow on the ground
+      if (d[1] >= 0) return null;
+      const t = (-1.23 - o[1]) / d[1], gx = o[0] + t * d[0], gz = o[2] + t * d[2];
+      return t > 0 && gx * gx / 0.85 + gz * gz / 0.6 < 1 ? [34, 54, 38] : null;
+    }
+    const nx0 = hx / hit.rx, ny0 = hy / hit.ry, nz0 = hz / hit.rz;
+    let [nx, ny, nz] = toWorld(nx0 * hit.ca - ny0 * hit.sa, nx0 * hit.sa + ny0 * hit.ca, nz0);
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    const base = hit.band && hy > hit.band.above ? hit.band.color : hit.color;
+    const facing = nx * light[0] + ny * light[1] + nz * light[2];
+    const k = 0.36 + 0.74 * Math.pow(Math.max(0, facing * 0.5 + 0.5), 1.7);
+    const rim = Math.pow(1 - Math.min(1, Math.abs(nz)), 3); // a cool edge light keeps the black fur visible on a dark screen
+    const spec = hit.shine ? Math.pow(Math.max(0, (nx * light[0] + ny * light[1] + nz * (light[2] + 1)) / 1.8), 24) * 190 : 0;
+    return [base[0] * k + rim * 34 + spec, base[1] * k + rim * 50 + spec, base[2] * k + rim * 72 + spec];
+  };
+  const px = [];
+  for (let y = 0; y < size; y++) {
+    const row = [];
+    for (let x = 0; x < size; x++) {
+      let r = 0, g = 0, b = 0, n = 0;
+      for (const [sx, sy2] of [[0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75]]) { // 4 samples per pixel: smooth edges
+        const c = trace(((x + sx) / size - 0.5) * span, mid + (0.5 - (y + sy2) / size) * span);
+        if (c) { r += c[0]; g += c[1]; b += c[2]; n++; }
+      }
+      row.push(n >= 2 ? [r, g, b].map(v => Math.min(255, Math.round(v / n / 6) * 6)) : null);
+    }
+    px.push(row);
+  }
+  return px;
+}
+function p3Lines(px) {
+  const lines = [];
+  for (let y = 0; y < px.length; y += 2) {
+    let s = '', fg = '', bg = '';
+    for (let x = 0; x < px[y].length; x++) {
+      const t = px[y][x], b = px[y + 1][x];
+      const wantFg = t || b ? (t || b).join(';') : '', wantBg = t && b ? b.join(';') : '';
+      if (!wantBg && bg) { s += '\x1b[0m'; fg = bg = ''; } // see-through again
+      if (wantFg && wantFg !== fg) { s += `\x1b[38;2;${wantFg}m`; fg = wantFg; }
+      if (wantBg && wantBg !== bg) { s += `\x1b[48;2;${wantBg}m`; bg = wantBg; }
+      s += !t && !b ? ' ' : !t ? '▄' : !b ? '▀' : wantFg === wantBg ? '█' : '▀';
+    }
+    lines.push(s + '\x1b[0m');
   }
   return lines;
 }
-const SPR_CACHE = {};
-function sprFrame(f) {
-  const len = 11 - (Math.floor(f / 4) % 9); // the stalk gets shorter bite by bite, then a fresh one appears
-  const open = f % 2 === 0;
-  return SPR_CACHE[len * 2 + (open ? 1 : 0)] ||= sprRender(munchGrid(len, open));
+const P3_CACHE = new Map();
+function pandaFrame(f, rows) {
+  const k = rows * 1000 + (f % P3_LOOP);
+  let r = P3_CACHE.get(k);
+  if (!r) P3_CACHE.set(k, r = p3Lines(p3Pixels(f % P3_LOOP, rows * 2)));
+  return r;
 }
+// the biggest panda that fits in the space, leaving room for the status text beside it (0 = no room)
+const pandaRows = (maxRows, cols) => useColor ? P3_SIZES.find(r => r <= maxRows && r * 2 + 30 <= cols) || 0 : 0;
 const spinner = {
   t: null, label: '', t0: 0, i: 0, tokens: 0, drawn: 0,
   start(label) {
     this.label = label || VERBS[Math.floor(Math.random() * VERBS.length)];
     this.t0 = Date.now(); this.tokens = 0;
     if (!process.stdout.isTTY) return;
-    clearInterval(this.t); this.drawn = 0; this.t = setInterval(() => this.draw(), 140); this.draw();
+    clearInterval(this.t); this.drawn = 0; this.t = setInterval(() => this.draw(), 110); this.draw();
   },
   set(label) { this.label = label; },
   // The animated block (status text + munching panda) as rows of a given width, for the pinned layout.
-  block(W) {
-    const big = useColor && W >= 44;
-    const avail = big ? W - SPR_W - 1 : W;
+  block(W, H = 24) {
+    const rows = pandaRows(Math.floor(H * 0.55), W), wide = rows * 2;
+    const avail = rows ? W - wide - 1 : W;
     const s = Math.floor((Date.now() - this.t0) / 1000);
     const extra = this.tokens ? ` · ↓ ${fmtK(this.tokens)} tokens` : '';
     const f = this.i;
     const head = C.bamboo(FRAMES[f % 4]) + ' ' + C.leaf(this.label + '…');
     let text = head + C.gray(` (${s}s${extra} · esc to interrupt)`);
     if (stripAnsi(text).length > avail) text = head + C.gray(` (${s}s)`);
-    if (!big) return [text];
-    return sprFrame(f).map((sp, idx) => { const left = idx === 1 ? text : ''; return left + ' '.repeat(Math.max(1, W - dispW(left) - SPR_W)) + sp; });
+    if (!rows) return [text];
+    return pandaFrame(f, rows).map((sp, idx) => { const left = idx === 1 ? text : ''; return left + ' '.repeat(Math.max(1, W - dispW(left) - wide)) + sp; });
   },
   draw() {
     if (!this.t) return;
     if (hdr.on) { this.i++; schedulePaint(); return; }
     if (scr.on) return;
     const cols = (process.stdout.columns || 80) - 1;
-    const big = useColor && cols >= 64;
-    const avail = big ? cols - SPR_W - 1 : cols;
+    const rows = pandaRows(Math.floor(((process.stdout.rows || 24) - 4) * 0.55), cols), wide = rows * 2; // must stay shorter than the window
+    const avail = rows ? cols - wide - 1 : cols;
     const s = Math.floor((Date.now() - this.t0) / 1000);
     const extra = this.tokens ? ` · ↓ ${fmtK(this.tokens)} tokens` : '';
     const f = this.i++;
@@ -149,10 +238,10 @@ const spinner = {
     let text = head + C.gray(` (${s}s${extra} · esc to interrupt)`);
     if (stripAnsi(text).length > avail) text = head + C.gray(` (${s}s)`);
     let buf = (this.drawn > 1 ? `\x1b[${this.drawn - 1}A` : '') + '\r\x1b[J';
-    if (big) {
-      const lines = sprFrame(f).map((sp, idx) => {
+    if (rows) {
+      const lines = pandaFrame(f, rows).map((sp, idx) => {
         const left = idx === 1 ? text : '';
-        return left + ' '.repeat(Math.max(1, cols - stripAnsi(left).length - SPR_W)) + sp;
+        return left + ' '.repeat(Math.max(1, cols - stripAnsi(left).length - wide)) + sp;
       });
       buf += lines.join('\n'); this.drawn = lines.length;
     } else { buf += text; this.drawn = 1; }
@@ -372,7 +461,7 @@ function mainRows(g) {
     const end = all.length - scr.off;
     return cutRows(all, Math.max(0, end - g.H), end);
   }
-  const spin = spinner.t ? spinner.block(g.leftW) : []; // the munching panda sits right after the latest output
+  const spin = spinner.t ? spinner.block(g.leftW, g.H) : []; // the munching panda sits right after the latest output
   const tail = cutRows(all, Math.max(0, all.length - Math.max(1, g.H - spin.length)));
   const rows = tail.concat(spin); rows.cont = tail.cont;
   return rows;
