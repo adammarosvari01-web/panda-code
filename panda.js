@@ -10,9 +10,10 @@ const cp = require('child_process');
 const readline = require('readline');
 const { AsyncLocalStorage } = require('async_hooks');
 const { StringDecoder } = require('string_decoder');
+const { setMaxListeners } = require('events'); // one Esc signal is shared by many steps of a long task
 const { Writable } = require('stream');
 
-const VERSION = '1.1.0';
+const VERSION = '1.1.1';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -592,10 +593,14 @@ let inputFilterOn = false;
 function installInputFilter() {
   if (inputFilterOn) return; inputFilterOn = true;
   const orig = process.stdin.emit, dec = new StringDecoder('utf8');
-  let paste = null, timer = null;
+  let paste = null, timer = null, held = '';
   process.stdin.emit = function (ev, ...a) {
     if (ev !== 'data') return orig.call(this, ev, ...a);
-    let s = Buffer.isBuffer(a[0]) ? dec.write(a[0]) : String(a[0]);
+    let s = held + (Buffer.isBuffer(a[0]) ? dec.write(a[0]) : String(a[0])); held = '';
+    if (paste === null) { // a mouse report or paste marker cut in half between two reads waits for its other half
+      const cut = s.match(hdr.mouse ? /\x1b\[(?:<[\d;]*|20?0?)$/ : /\x1b\[20?0?$/);
+      if (cut) { held = cut[0]; s = s.slice(0, -held.length); }
+    }
     const keys = t => {
       if (hdr.mouse) t = t.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (m, bt, x, y, k) => { onMouse(+bt, +x, +y, k === 'm'); return ''; });
       if (t) orig.call(process.stdin, 'data', Buffer.from(t, 'utf8'));
@@ -617,6 +622,8 @@ function installInputFilter() {
     return true;
   };
 }
+// A "[Pasted text #1 ...]" line only means something while that paste is in memory; recalled later it would expand to the wrong text.
+const savedHistory = h => (h || []).filter(l => !/\[Pasted text #\d+ \+\d+ lines\]/.test(l)).slice(0, 500);
 function shortPath(p) { const h = os.homedir(); return p.toLowerCase().startsWith(h.toLowerCase()) ? '~' + p.slice(h.length) : p; }
 function banner() {
   const art = pandaArt();
@@ -2396,7 +2403,7 @@ const ui = {
     try { await this.handler(text, literal); } catch (e) { spinner.stop(); out(C.red('  ⎿  Error: ' + (e.message || e))); }
     spinner.stop();
     this.busy = false;
-    try { fs.mkdirSync(HOME_DIR, { recursive: true }); fs.writeFileSync(HISTORY_PATH, JSON.stringify(this.rl.history.slice(0, 500))); } catch { }
+    try { fs.mkdirSync(HOME_DIR, { recursive: true }); fs.writeFileSync(HISTORY_PATH, JSON.stringify(savedHistory(this.rl.history))); } catch { }
     if (this.queue.length) return this.run(...this.queue.shift());
     this.prompt();
   },
@@ -2482,7 +2489,7 @@ function shutdown() {
   unpinHeader();
   for (const sh of state.shells.values()) if (sh.status === 'running') killTree(sh.proc);
   saveSession();
-  try { fs.writeFileSync(HISTORY_PATH, JSON.stringify(ui.rl?.history?.slice(0, 500) || [])); } catch { }
+  try { fs.writeFileSync(HISTORY_PATH, JSON.stringify(savedHistory(ui.rl?.history))); } catch { }
   process.stdout.write('\n' + C.bamboo('🐼 Bye! Back to the bamboo.') + '\n');
   process.exit(0);
 }
@@ -2556,7 +2563,7 @@ async function runTurn(content, images = []) {
   const last = session.messages[session.messages.length - 1];
   if (last && last.role === 'user') { last.content += '\n\n' + content; if (images.length) last.images = (last.images || []).concat(images); }
   else session.messages.push(images.length ? { role: 'user', content, images } : { role: 'user', content });
-  const ac = new AbortController(); ui.abort = ac;
+  const ac = new AbortController(); ui.abort = ac; setMaxListeners(0, ac.signal);
   const opts = { signal: ac.signal, depth: 0, indent: '', quiet: false };
   const tStart = Date.now(), outStart = state.totalOut;
   out('');
@@ -3075,7 +3082,7 @@ Code and downloads: ${DC_REPO}
     { name: 'team-chat', access: 'team', topic: 'Private channel for the Certified Panda, Panda Dev and Panda Team.', post: '🔒 **#team-chat**: private to the **Certified Panda**, **Panda Dev** and **Panda Team**.\n• Give people the **Panda Bot Access** role to let them use the bot\n• Post releases in #announcements' },
   ] },
 ];
-// Channel permissions. `ids`: everyone = the server id (the @everyone role), certified/dev/team/bot = the five roles, me = the bot account.
+// Channel permissions. `ids`: everyone = the server id (the @everyone role), certified/dev/team/bot = those roles, me = the bot account.
 const DC_TEAM_KEYS = ['certified', 'dev', 'team'];
 function dcOverwrites(access, ids) {
   if (access === 'open') return [];
@@ -3112,15 +3119,25 @@ async function dcBuildServer(guildId) {
     ids[r.key] = role.id;
   }
   const existing = await dcRest('GET', `/guilds/${guildId}/channels`);
-  let askId = '', unpinned = 0;
+  let askId = '', unpinned = 0, opened = 0, closed = 0;
+  const newTeam = DC_TEAM_KEYS.filter(k => made.includes('role ' + DC_ROLES.find(r => r.key === k).name));
   for (const c of DC_LAYOUT) {
     let cat = existing.find(x => x.type === 4 && x.name === c.category);
     const missing = c.channels.filter(ch => !existing.some(x => x.type === 0 && x.name === ch.name));
     if (!cat && missing.length) { cat = await dcRest('POST', `/guilds/${guildId}/channels`, { name: c.category, type: 4 }); made.push(c.category); }
     for (const ch of c.channels) {
       let chan = existing.find(x => x.type === 0 && x.name === ch.name);
-      if (chan) kept.push('#' + ch.name);
-      else {
+      if (chan) {
+        kept.push('#' + ch.name);
+        // A channel Panda built earlier (the old Panda Team role has its own entry) also has to let in team roles added since,
+        // or people given them could not use it. Access is only added; existing entries are left alone.
+        const had = chan.permission_overwrites || [];
+        if (ch.access !== 'open' && had.some(o => o.id === ids.team)) for (const k of newTeam) {
+          if (had.some(o => o.id === ids[k])) continue;
+          const want = dcOverwrites(ch.access, ids).find(o => o.id === ids[k]);
+          try { await dcRest('PUT', `/channels/${chan.id}/permissions/${ids[k]}`, { type: 0, allow: want.allow, deny: want.deny }); opened++; } catch { closed++; }
+        }
+      } else {
         chan = await dcRest('POST', `/guilds/${guildId}/channels`, { name: ch.name, type: 0, parent_id: cat?.id, topic: ch.topic, permission_overwrites: dcOverwrites(ch.access, ids) });
         made.push('#' + ch.name); out(C.gray('  ⎿  #') + ch.name);
         const msg = await dcRest('POST', `/channels/${chan.id}/messages`, { content: ch.post, flags: 4, allowed_mentions: { parse: [] } });
@@ -3129,18 +3146,28 @@ async function dcBuildServer(guildId) {
       if (ch.name === 'ask-panda') askId = chan.id;
     }
   }
+  // Certified Panda must rank highest. A role made now starts at the bottom, below Panda roles from an earlier run, so sort them.
+  let unsorted = false;
+  if (made.some(m => m.startsWith('role '))) try {
+    const now = await dcRest('GET', `/guilds/${guildId}/roles`);
+    const mine = DC_ROLES.map(r => now.find(x => x.id === ids[r.key])); // highest first
+    if (mine.every(x => x && Number.isFinite(x.position)) && mine.some((x, i) => i && x.position >= mine[i - 1].position)) {
+      const low = Math.max(1, Math.min(...mine.map(x => x.position)));
+      await dcRest('PATCH', `/guilds/${guildId}/roles`, mine.map((x, i) => ({ id: x.id, position: low + mine.length - 1 - i })));
+    }
+  } catch { unsorted = true; }
   let ownerTagged = false;
   try { await dcRest('PUT', `/guilds/${guildId}/members/${guild.owner_id}/roles/${ids.certified}`); ownerTagged = true; } catch { }
   // the bot now only listens in #ask-panda, and only to people with one of the roles (plus the server owner); DMs are off
   const cfg = dcLoad(); cfg.channels = [askId]; cfg.roles = [ids.certified, ids.dev, ids.team, ids.bot]; cfg.ownerId = guild.owner_id; cfg.dm = false; dcSave();
-  return { guild, made, kept, unpinned, ownerTagged, askId };
+  return { guild, made, kept, unpinned, ownerTagged, askId, opened, closed, unsorted };
 }
 async function dcServerCmd(val) {
   if (!dcToken()) { out(C.yellow('  First give Panda your bot token: /discord setup explains how.')); return; }
   if (val !== 'setup') {
     out(C.bold('  What /discord server setup will build'));
     for (const l of dcServerPlan()) out(l);
-    out(C.gray('  Each channel gets its own pinned note, #rules gets the server rules, and the bot answers only in #ask-panda.\n  Nothing that already exists is deleted or changed. Run:  ') + C.bamboo('/discord server setup'));
+    out(C.gray('  Each channel gets its own pinned note, #rules gets the server rules, and the bot answers only in #ask-panda.\n  Nothing is deleted. The only changes to what exists: Panda roles are put in rank order,\n  and channels Panda built earlier let new team roles in. Run:') + C.bamboo('/discord server setup'));
     return;
   }
   try {
@@ -3150,12 +3177,15 @@ async function dcServerCmd(val) {
     let g = guilds[0];
     if (guilds.length > 1) { const i = await ui.select('  ' + C.bold('Which server?'), guilds.map(x => ({ label: x.name }))); if (i < 0) return; g = guilds[i]; }
     for (const l of dcServerPlan()) out(l);
-    const ok = await ui.select('  ' + C.bold(`Build this in "${g.name}"?`) + C.gray(' (adds roles, channels and posts; deletes nothing)'), [{ label: 'Yes, build it' }, { label: 'No' }]);
+    const ok = await ui.select('  ' + C.bold(`Build this in "${g.name}"?`) + C.gray(' (adds roles, channels, posts and team access; deletes nothing)'), [{ label: 'Yes, build it' }, { label: 'No' }]);
     if (ok !== 0) { out(C.gray('  (cancelled)')); return; }
     const r = await dcBuildServer(g.id);
     out(C.green(`  ✓ Done: created ${r.made.length} item(s) in ${r.guild.name}.`) + (r.kept.length ? C.gray(` Left as they were: ${r.kept.join(', ')}.`) : ''));
     if (r.unpinned) out(C.yellow(`  ${r.unpinned} channel note(s) could not be pinned; pin them by hand.`));
-    if (r.kept.some(k => k.startsWith('#'))) out(C.yellow('  Channels that already existed keep their old permissions and got no note.'));
+    if (r.opened) out(C.gray(`  Let the new team roles into channels built earlier (${r.opened} change(s)).`));
+    if (r.closed) out(C.yellow(`  ${r.closed} channel permission(s) could not be added: give the new roles access in each channel's settings.`));
+    if (r.unsorted) out(C.yellow('  The roles could not be put in order: in Server Settings → Roles, drag Certified Panda to the top, then Panda Dev.'));
+    if (r.kept.some(k => k.startsWith('#'))) out(C.yellow('  Channels that already existed got no new note, and their other permissions are unchanged.'));
     out(C.gray('  The bot now answers only in #ask-panda, only to members with Certified Panda, Panda Dev, Panda Team or Panda Bot Access (and you). DMs are off.'));
     out(C.gray('  Give someone access: right-click their name in Discord → Roles → Certified Panda / Panda Dev / Panda Team / Panda Bot Access. Then run ') + C.bamboo('/discord on'));
   } catch (e) {
@@ -3450,7 +3480,7 @@ async function learnCmd(arg) {
     }
     if (!course) { request = (await ui.ask(C.bamboo('  What do you want to learn, and to what level? ❯ '))).trim(); if (!request || isStop(request)) return; }
   }
-  const ac = new AbortController(); ui.abort = ac;
+  const ac = new AbortController(); ui.abort = ac; setMaxListeners(0, ac.signal);
   try {
     if (!course) {
       let { topic, level } = parseLearn(request);
@@ -3930,10 +3960,12 @@ async function ctlElements(shot) {
   let raw = ''; try { raw = Buffer.from(await desk.call('elements 60', 8000), 'base64').toString('utf8'); } catch { return []; }
   return raw.split('\n').filter(Boolean).map((l, i) => { const [kind, label, x, y, w, h] = l.split('|'), name = maskSecret(label); const cx = +x + Math.floor(+w / 2), cy = +y + Math.floor(+h / 2); return { no: i + 1, kind, name, cx, cy, ...(({ x: gx, y: gy }) => ({ gx, gy }))(ctlToGrid(shot, cx, cy)) }; });
 }
-const ctlWords = t => String(t || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 1 && !/^(the|a|an|button|link|box|field|icon|in|on|of|at|to)$/.test(w));
+// models often fill in 0,0 when they mean "no position", which would hit the top left corner
+const ctlHasXY = a => Number.isFinite(a.x) && Number.isFinite(a.y) && !(a.x === 0 && a.y === 0);
+const ctlWords = t =>String(t || '').toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(w => w.length > 1 && !/^(the|a|an|button|link|box|field|icon|in|on|of|at|to)$/.test(w));
 // Which screen pixel does this action mean? An element number is exact; a rough position is checked in a full-resolution close-up.
 async function ctlAim(a, shot, els, misses, signal) {
-  const el = els[(a.element | 0) - 1], hasXY = Number.isFinite(a.x) && Number.isFinite(a.y);
+  const el = els[(a.element | 0) - 1], hasXY = ctlHasXY(a);
   if (el) {
     const near = hasXY && Math.hypot(a.x - el.gx, a.y - el.gy) < 120, named = ctlWords(a.target).some(w => ctlWords(el.name).includes(w));
     if (!hasXY || near || named || !a.target) return { x: el.cx, y: el.cy, how: `element ${el.no} ${el.kind} "${el.name}"` };
@@ -3951,7 +3983,12 @@ async function ctlAim(a, shot, els, misses, signal) {
   if (n < 2) throw new Error(`a close-up of that spot does not show "${a.target}". Look at the screenshot again and give a better position or an element number`);
   return { ...guess, how: 'your position' };
 }
-const ctlSleep = (ms, signal) => new Promise((res, rej) => { const t = setTimeout(res, ms); signal.addEventListener('abort', () => { clearTimeout(t); const e = new Error('aborted'); e.name = 'AbortError'; rej(e); }, { once: true }); });
+const ctlSleep = (ms, signal) => new Promise((res, rej) => {
+  const stop = () => { clearTimeout(t); const e = new Error('aborted'); e.name = 'AbortError'; rej(e); };
+  if (signal.aborted) return rej(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+  const t = setTimeout(() => { signal.removeEventListener('abort', stop); res(); }, ms);
+  signal.addEventListener('abort', stop, { once: true });
+});
 const ctlB64 = s => Buffer.from(String(s), 'utf8').toString('base64');
 // Carries out one action. Returns a short description of what was done.
 async function ctlAct(a, c) {
@@ -3970,7 +4007,7 @@ async function ctlAct(a, c) {
     }
     case 'scroll': {
       const el = els[(a.element | 0) - 1];
-      const p = el ? { x: el.cx, y: el.cy } : ctlToScreen(shot, Number.isFinite(a.x) ? a.x : 500, Number.isFinite(a.y) ? a.y : 500);
+      const p = el ? { x: el.cx, y: el.cy } : ctlToScreen(shot, ctlHasXY(a) ? a.x : 500, ctlHasXY(a) ? a.y : 500);
       const n = Math.max(-15, Math.min(15, (a.amount | 0) || 5));
       await desk.call(`scroll ${p.x} ${p.y} ${-n}`); return `scroll ${n > 0 ? 'down' : 'up'} ${Math.abs(n)} at (${p.x}, ${p.y})`;
     }
@@ -3981,7 +4018,9 @@ async function ctlAct(a, c) {
     }
     case 'key': {
       const k = String(a.keys || a.text || '').trim().toLowerCase(); if (!k) throw new Error('key needs "keys"');
-      for (const combo of k.split(/[\s,]+/).slice(0, 8)) { await desk.call('key ' + ctlB64(combo)); await ctlSleep(60, signal); }
+      // "ctrl + s" is one shortcut, "tab, enter" is two, and "ctrl+," or "ctrl++" keep their last key
+      const combos = k.replace(/\s*\+\s*/g, '+').replace(/\+\+(?=[\s,]|$)/g, '+plus').split(/,?\s+|(?<!\+),(?=[a-z0-9])/).filter(Boolean);
+      for (const combo of combos.slice(0, 8)) { await desk.call('key ' + ctlB64(combo)); await ctlSleep(60, signal); }
       return `press ${k}`;
     }
     case 'open_app': {
@@ -3992,7 +4031,7 @@ async function ctlAct(a, c) {
       return `open ${name}`;
     }
     case 'zoom': {
-      const p = ctlToScreen(shot, Number.isFinite(a.x) ? a.x : 500, Number.isFinite(a.y) ? a.y : 500);
+      const p = ctlToScreen(shot, ctlHasXY(a) ? a.x : 500, ctlHasXY(a) ? a.y : 500);
       const w = Math.min(shot.w, 640), h = Math.min(shot.h, 400);
       const x = Math.max(shot.x, Math.min(shot.x + shot.w - w, p.x - (w >> 1))), y = Math.max(shot.y, Math.min(shot.y + shot.h - h, p.y - (h >> 1)));
       c.zoom = { data: await desk.call(`crop ${x} ${y} ${w} ${h} ${w * 2}`), note: `The second picture is a close-up of the area from (${ctlToGrid(shot, x, y).x}, ${ctlToGrid(shot, x, y).y}) to (${ctlToGrid(shot, x + w, y + h).x}, ${ctlToGrid(shot, x + w, y + h).y}). Give positions on the FIRST picture.` };
@@ -4028,9 +4067,9 @@ async function ctlConfirm(task, signal) {
 }
 // Why computer control cannot run right now, or null.
 function ctlBlocked() {
+  if (!IS_WIN) return 'Computer control works on Windows only for now.';
   if (state.mode !== 'bypass') return COMPUTER_OFF;
   if (state.readonlyTurn) return 'This is a read-only analysis, so the computer is not being controlled.';
-  if (!IS_WIN) return 'Computer control works on Windows only for now.';
   if (!state.interactive) return 'Computer control needs the interactive Panda terminal.';
   if (state.vision === false) return `The current model (${state.model}) cannot see images, so it cannot see your screen. Pick a model marked "vision" with /model.`;
   return null;
@@ -4039,7 +4078,10 @@ function ctlBlocked() {
 async function computerTask(task, ac) {
   const why = ctlBlocked(); if (why) return { ok: false, text: why };
   const signal = ac.signal;
-  const ok = await ctlConfirm(task, signal);
+  setMaxListeners(0, signal);
+  let ok;
+  try { ok = await ctlConfirm(task, signal); }
+  catch (e) { if (signal.aborted || e.name === 'AbortError') return { ok: false, stopped: true, text: 'Stopped before anything on the computer was touched.' }; throw e; }
   if (!ok) return { ok: false, stopped: true, text: 'Cancelled: nothing on the computer was touched.' };
   let escaped = false, hwnd = '';
   const log = [], c = { misses: new Map(), signal, zoom: null, screen: state.computerScreen || 'primary' };
@@ -4052,12 +4094,17 @@ async function computerTask(task, ac) {
       ui.queue.length = 0; side.abort?.abort(); ac.abort();
       desk.call('release').catch(() => { });
     };
+    const main = desk.screens.find(s => s.primary)?.no || 1;
+    if (c.screen !== 'all' && !desk.screens.some(s => s.no === Number(c.screen))) {
+      if (c.screen !== 'primary') out(C.yellow(`  ⎿  there is no screen ${c.screen}, so the main screen is shared`));
+      c.screen = main;
+    }
     await desk.call(`size ${state.computerRes || 480} ${c.screen}`);
     if (!state.computerKeepWindow) { hwnd = (await desk.call('foreground')).split('\t')[0]; await desk.call('minimize ' + hwnd); await ctlSleep(500, signal); } // get Panda's own window out of the way
     const first = await ctlShot();
     spinner.stop();
     out(C.gray(`  ⎿  live screen share: ${first.w}x${first.h} → ${first.iw}x${first.ih} at 30 fps · press Esc to stop`));
-    let invalid = 0, last = '', same = 0;
+    let invalid = 0, last = '', same = 0, streak = 0, moved = true;
     for (let step = 1; step <= CTL_MAX_STEPS; step++) {
       if (signal.aborted) break;
       spinner.start(`Looking at the screen (step ${step})`);
@@ -4068,9 +4115,12 @@ async function computerTask(task, ac) {
       if (!a || !CTL_ACTIONS.includes(a.action)) { spinner.stop(); if (++invalid >= 3) return done(false, 'The model did not give usable actions, so Panda stopped.'); log.push(`${step}. (your reply was not a valid action)`); continue; }
       invalid = 0;
       if (a.action === 'done' || a.action === 'give_up') { spinner.stop(); return done(a.action === 'done', String(a.message || a.see || (a.action === 'done' ? 'Done.' : 'It could not be done.'))); }
-      const sig = JSON.stringify([a.action, a.element, a.x, a.y, a.text, a.keys]);
-      same = sig === last ? same + 1 : 0; last = sig;
-      if (same >= 4) { spinner.stop(); return done(false, 'The same action kept repeating with no progress, so Panda stopped.'); }
+      // stuck = the same action again and again with nothing happening (waiting, or scrolling a long page, is progress)
+      if (a.action !== 'wait') {
+        const sig = JSON.stringify([a.action, a.element, a.x, a.y, a.to_x, a.to_y, a.text, a.keys, a.amount]);
+        streak = sig === last ? streak + 1 : 0; same = sig === last && !moved ? same + 1 : 0; last = sig;
+        if (same >= 4 || streak >= 15) { spinner.stop(); return done(false, 'The same action kept repeating with no progress, so Panda stopped.'); }
+      }
       let result;
       try {
         await desk.call('mark');
@@ -4080,6 +4130,7 @@ async function computerTask(task, ac) {
         spinner.set('Watching the screen');
         const changed = a.action === 'zoom' || a.action === 'wait' ? true : (await desk.call('settle 2000')).startsWith('1');
         spinner.stop();
+        if (a.action !== 'wait') moved = changed;
         out(C.bamboo('  ● ') + C.bold(what));
         result = `${what} -> ${changed ? 'the screen changed' : 'no visible change (normal when only focusing a field; otherwise try another way)'}${same >= 2 ? ' (you keep repeating this: try something else)' : ''}`;
         if (!changed) out(C.gray('  ⎿  nothing visibly changed'));
@@ -4087,6 +4138,7 @@ async function computerTask(task, ac) {
         spinner.stop();
         if (signal.aborted || e.name === 'AbortError' || e.message === 'stopped') break;
         out(C.yellow('  ⎿  ' + e.message));
+        moved = false;
         result = `${a.action} failed: ${e.message}`;
       }
       log.push(`${step}. ${result}`);
@@ -4119,7 +4171,7 @@ async function runComputer(task) {
   session.messages.push({ role: 'user', content: `Control my computer: ${t}` }, { role: 'assistant', content: `[Computer control ${r.ok ? 'finished' : 'did not finish'}] ${r.text}` });
   saveSession();
 }
-TOOLS.ComputerControl = {
+if (IS_WIN) TOOLS.ComputerControl = {
   perm: null,
   description: 'Does a task on the user\'s Windows PC by seeing the screen and using the mouse and keyboard. Call it only when the user asks you to do something on their computer\'s screen or in a desktop program. Panda confirms the task with the user first. Needs bypass permissions to be on.',
   schema: { type: 'object', properties: { task: P('string', 'What the user asked for, in their own words with all details') }, required: ['task'] },
