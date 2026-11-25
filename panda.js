@@ -10,7 +10,7 @@ const cp = require('child_process');
 const readline = require('readline');
 const { AsyncLocalStorage } = require('async_hooks');
 
-const VERSION = '1.0.3';
+const VERSION = '1.0.4';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -2134,7 +2134,7 @@ const ui = {
       const sp = line.indexOf(' ');
       if (sp < 0) return pick(SLASH, line);
       const cmd = line.slice(0, sp).toLowerCase(), arg = line.slice(sp + 1);
-      const opts = { '/mode': ['default', 'acceptEdits', 'plan', 'bypass'], '/think': ['on', 'off', 'auto', 'show', 'hide'], '/pin': ['on', 'off'], '/mouse': ['on', 'off'], '/ctx': ['32768', '65536', '131072'], '/btw': ['agent', 'model', 'close', 'clear', 'refresh', 'stop'], '/discord': ['setup', 'on', 'off', 'status', 'token', 'webhook', 'say', 'channel', 'cooldown', 'forget'], '/model': state.modelNames || [] }[cmd];
+      const opts = { '/mode': ['default', 'acceptEdits', 'plan', 'bypass'], '/think': ['on', 'off', 'auto', 'show', 'hide'], '/pin': ['on', 'off'], '/mouse': ['on', 'off'], '/ctx': ['32768', '65536', '131072'], '/btw': ['agent', 'model', 'close', 'clear', 'refresh', 'stop'], '/discord': ['setup', 'on', 'off', 'status', 'server', 'token', 'webhook', 'say', 'channel', 'role', 'dm', 'cooldown', 'forget'], '/model': state.modelNames || [] }[cmd];
       if (opts && !arg.includes(' ')) { const r = pick(opts, arg); if (r) return r; }
     }
     const at = line.match(/(^|\s)@([^\s]+)$/);
@@ -2597,7 +2597,7 @@ Rules:
 - If asked who made Panda Code or how it was made, say you don't know the details. Do not make claims about it.
 - Decline requests for harmful or abusive content.`;
 }
-function dcLoad() { if (dc.cfg) return dc.cfg; try { dc.cfg = JSON.parse(fs.readFileSync(DISCORD_FILE, 'utf8')); } catch { dc.cfg = {}; } dc.cfg.channels ||= []; return dc.cfg; }
+function dcLoad() { if (dc.cfg) return dc.cfg; try { dc.cfg = JSON.parse(fs.readFileSync(DISCORD_FILE, 'utf8')); } catch { dc.cfg = {}; } dc.cfg.channels ||= []; dc.cfg.roles ||= []; return dc.cfg; }
 function dcSave() { fs.mkdirSync(HOME_DIR, { recursive: true }); fs.writeFileSync(DISCORD_FILE, JSON.stringify(dc.cfg, null, 2), { mode: 0o600 }); }
 const dcToken = () => process.env.PANDA_DISCORD_TOKEN || dcLoad().token || '';
 const dcInvite = () => dc.botId ? `https://discord.com/oauth2/authorize?client_id=${dc.botId}&scope=bot&permissions=68608` : ''; // view channels + send messages + read history
@@ -2661,6 +2661,16 @@ function dcOnMessage(m) {
   const now = Date.now(), cool = (cfg.cooldown ?? 10) * 1000, last = dc.last.get(m.author.id) || 0;
   const who = m.member?.nick || m.author.global_name || m.author.username;
   const say = t => dcRest('POST', `/channels/${m.channel_id}/messages`, { content: t, message_reference: { message_id: m.id, fail_if_not_exists: false }, allowed_mentions: { parse: [], replied_user: false } }).catch(() => { });
+  // who may talk to the bot: with roles set, only members who have one (or the owner); DMs need to be allowed explicitly then
+  const noDM = dm && (cfg.dm === false || (cfg.roles.length > 0 && cfg.dm !== true));
+  const noRole = !dm && cfg.roles.length > 0 && m.author.id !== cfg.ownerId && !(m.member?.roles || []).some(r => cfg.roles.includes(r));
+  if (noDM || noRole) {
+    if (now - (dc.last.get('denied:' + m.author.id) || 0) > 60000) { // explain once a minute at most, so it can't be used to spam
+      dc.last.set('denied:' + m.author.id, now);
+      say(noDM ? 'Direct messages are turned off. Please ask me in the server.' : `Sorry ${who}, you don't have permission to chat with me yet. Ask the team for the **Panda Bot Access** role.`);
+    }
+    return;
+  }
   if (now - last < cool) { say(`Easy there, ${who}: please wait ${Math.ceil((cool - (now - last)) / 1000)}s before asking again.`); return; }
   if (dc.queue.length >= 5) { say('I am answering a lot of people right now. Please try again in a minute.'); return; }
   dc.last.set(m.author.id, now);
@@ -2702,11 +2712,153 @@ async function dcWebhookSend(text) {
   if (!r.ok) throw new Error(`Discord ${r.status}: ${(await r.text()).slice(0, 200)}`);
 }
 const dcWebhookOk = u => /^https:\/\/(canary\.|ptb\.)?(discord|discordapp)\.com\/api\/(v\d+\/)?webhooks\/\d+\/[\w-]+$/.test(u) || (process.env.PANDA_DISCORD_API && u.startsWith(process.env.PANDA_DISCORD_API));
+// ── /discord server: builds an organised community server (roles, channels, per-channel rules and permissions) with the bot ──
+const DP = { MANAGE_CHANNELS: 1n << 4n, ADD_REACTIONS: 1n << 6n, VIEW: 1n << 10n, SEND: 1n << 11n, MANAGE_MESSAGES: 1n << 13n, HISTORY: 1n << 16n, MANAGE_ROLES: 1n << 28n, PUB_THREADS: 1n << 35n, PRIV_THREADS: 1n << 36n, THREAD_SEND: 1n << 38n, PIN: 1n << 51n };
+const DP_SETUP = Object.values(DP).reduce((a, b) => a | b, 0n);
+const DP_TALK = DP.SEND | DP.PUB_THREADS | DP.PRIV_THREADS | DP.THREAD_SEND;
+const dcSetupInvite = () => dc.botId ? `https://discord.com/oauth2/authorize?client_id=${dc.botId}&scope=bot&permissions=${DP_SETUP}` : '';
+const DC_ROLES = [
+  { key: 'team', name: 'Panda Team', color: 0x7ac95c, hoist: true },
+  { key: 'bot', name: 'Panda Bot Access', color: 0xf096b4, hoist: false },
+];
+const DC_REPO = 'https://github.com/adammarosvari01-web/panda-code';
+const DC_SERVER_RULES = `# 📜 Server Rules
+**1. Be respectful.** No harassment, hate speech, slurs, threats or personal attacks.
+**2. Keep it safe for work.** No NSFW, gore or shocking content.
+**3. No spam.** No flooding, mass pings, unsolicited ads, invite links or scams.
+**4. Protect secrets.** Never post passwords, API keys, bot tokens or webhook links, yours or anyone else's.
+**5. Nothing harmful.** No malware, hacking of systems you don't own, piracy or illegal content.
+**6. Respect privacy.** Don't share anyone's personal information.
+**7. Use the right channel.** Each channel's pinned note says what belongs there.
+**8. Listen to the team.** Panda Team decisions are final. Questions? Ask politely in #help.
+**9. Follow Discord's Terms of Service and Community Guidelines.**
+
+Breaking the rules can get your messages removed, or you muted or banned.`;
+const DC_LAYOUT = [
+  { category: '📌 INFORMATION', channels: [
+    { name: 'welcome', access: 'readonly', topic: 'Start here: what Panda Code is and how to install it.', post: `# 🐼 Welcome to the official Panda Code server
+Panda Code is a coding agent that runs in your terminal and uses AI models on your own PC.
+
+**Install**
+PowerShell: \`irm https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.ps1 | iex\`
+Mac/Linux: \`curl -fsSL https://raw.githubusercontent.com/adammarosvari01-web/panda-code/main/get-panda.sh | sh\`
+Code and downloads: ${DC_REPO}
+
+**Getting around**
+1. Read #rules
+2. Say hi in #general
+3. Stuck? Ask in #help` },
+    { name: 'rules', access: 'readonly', topic: 'The server rules. Everyone must follow them.', post: DC_SERVER_RULES },
+    { name: 'announcements', access: 'readonly', topic: 'News and new releases. Only the Panda Team posts here.', post: `📣 **Announcements** are posted here by the Panda Team: new releases, fixes and news.\nLatest downloads: ${DC_REPO}/releases` },
+  ] },
+  { category: '💬 COMMUNITY', channels: [
+    { name: 'general', access: 'open', topic: 'Friendly chat about Panda Code, local AI and coding.', post: '💬 **#general**: friendly chat about Panda Code, local AI and coding.\n• Be kind to newcomers\n• Bug reports go in #bugs, questions in #help' },
+    { name: 'showcase', access: 'open', topic: 'Show what you built with Panda Code.', post: '✨ **#showcase**: show what you built with Panda Code.\n• Share your own work\n• Say which model you used\n• Keep feedback constructive' },
+    { name: 'ideas', access: 'open', topic: 'Feature requests and suggestions.', post: '💡 **#ideas**: suggest features.\n• One idea per message\n• Say what problem it solves\n• React 👍 on ideas you want' },
+  ] },
+  { category: '🛠️ SUPPORT', channels: [
+    { name: 'help', access: 'open', topic: 'Questions about installing and using Panda Code.', post: '🆘 **#help**: ask for help.\nInclude: your operating system, your model (see `/status`), what you typed and the exact error.\n• Try `pandacode doctor` first\n• **Remove any keys or tokens** before pasting' },
+    { name: 'bugs', access: 'open', topic: 'Report bugs with steps to reproduce.', post: `🐛 **#bugs**: report problems.\n1. What did you do?\n2. What did you expect?\n3. What happened (exact error)?\n4. Panda version (\`pandacode --version\`) and OS\nYou can also open an issue: ${DC_REPO}/issues` },
+  ] },
+  { category: '🐼 PANDA BOT', channels: [
+    { name: 'ask-panda', access: 'bot', topic: 'Talk to the Panda bot. Needs the Panda Bot Access role.', post: '🤖 **#ask-panda**: tag the bot to ask it something.\n• Only members with the **Panda Bot Access** role can chat here (ask the Panda Team)\n• One question every few seconds\n• It runs on a home PC: it can be slow or offline\n• AI answers can be wrong; check anything important\n• Never share secrets with it' },
+  ] },
+  { category: '🔒 TEAM', channels: [
+    { name: 'team-chat', access: 'team', topic: 'Private channel for the Panda Team.', post: '🔒 **#team-chat**: private to the Panda Team.\n• Give people the **Panda Bot Access** role to let them use the bot\n• Post releases in #announcements' },
+  ] },
+];
+// Channel permissions. `ids`: everyone = the server id (the @everyone role), team and bot = the two roles, me = the bot account.
+function dcOverwrites(access, ids) {
+  if (access === 'open') return [];
+  const o = [], add = (id, type, allow, deny = 0n) => o.push({ id, type, allow: String(allow), deny: String(deny) });
+  const read = DP.VIEW | DP.HISTORY;
+  if (access === 'team') add(ids.everyone, 0, 0n, DP.VIEW); else add(ids.everyone, 0, read, DP_TALK);
+  add(ids.team, 0, read | DP_TALK);
+  if (access === 'bot') add(ids.bot, 0, read | DP.SEND);
+  add(ids.me, 1, read | DP.SEND | DP.PIN); // the bot must be able to post and pin its channel note
+  return o;
+}
+function dcServerPlan() {
+  const who = { readonly: 'everyone reads, only the team posts', open: 'everyone chats', bot: 'everyone reads, only people with Panda Bot Access (and the team) can type', team: 'hidden from everyone except the team' };
+  const L = [C.gray('  Roles: ') + DC_ROLES.map(r => r.name).join(', ')];
+  for (const c of DC_LAYOUT) { L.push('  ' + C.bold(c.category)); for (const ch of c.channels) L.push('    ' + C.bamboo('#' + ch.name.padEnd(14)) + C.gray(who[ch.access])); }
+  return L;
+}
+async function dcPin(channel, message) { // newer endpoint first, then the old one
+  try { await dcRest('PUT', `/channels/${channel}/messages/pins/${message}`); } catch { try { await dcRest('PUT', `/channels/${channel}/pins/${message}`); } catch { return false; } }
+  return true;
+}
+// Creates what is missing. Never deletes or changes anything that already exists.
+async function dcBuildServer(guildId) {
+  const me = await dcRest('GET', '/users/@me'); dc.botId = me.id;
+  const guild = await dcRest('GET', `/guilds/${guildId}`);
+  const roles = await dcRest('GET', `/guilds/${guildId}/roles`);
+  const ids = { everyone: guildId, me: me.id }, made = [], kept = [];
+  for (const r of DC_ROLES) {
+    let role = roles.find(x => x.name === r.name);
+    if (role) kept.push('role ' + r.name);
+    else { role = await dcRest('POST', `/guilds/${guildId}/roles`, { name: r.name, color: r.color, hoist: r.hoist, mentionable: false, permissions: '0' }); made.push('role ' + r.name); out(C.gray('  ⎿  role ') + r.name); }
+    ids[r.key] = role.id;
+  }
+  const existing = await dcRest('GET', `/guilds/${guildId}/channels`);
+  let askId = '', unpinned = 0;
+  for (const c of DC_LAYOUT) {
+    let cat = existing.find(x => x.type === 4 && x.name === c.category);
+    const missing = c.channels.filter(ch => !existing.some(x => x.type === 0 && x.name === ch.name));
+    if (!cat && missing.length) { cat = await dcRest('POST', `/guilds/${guildId}/channels`, { name: c.category, type: 4 }); made.push(c.category); }
+    for (const ch of c.channels) {
+      let chan = existing.find(x => x.type === 0 && x.name === ch.name);
+      if (chan) kept.push('#' + ch.name);
+      else {
+        chan = await dcRest('POST', `/guilds/${guildId}/channels`, { name: ch.name, type: 0, parent_id: cat?.id, topic: ch.topic, permission_overwrites: dcOverwrites(ch.access, ids) });
+        made.push('#' + ch.name); out(C.gray('  ⎿  #') + ch.name);
+        const msg = await dcRest('POST', `/channels/${chan.id}/messages`, { content: ch.post, flags: 4, allowed_mentions: { parse: [] } });
+        if (!await dcPin(chan.id, msg.id)) unpinned++;
+      }
+      if (ch.name === 'ask-panda') askId = chan.id;
+    }
+  }
+  let ownerTagged = false;
+  try { await dcRest('PUT', `/guilds/${guildId}/members/${guild.owner_id}/roles/${ids.team}`); ownerTagged = true; } catch { }
+  // the bot now only listens in #ask-panda, and only to people with one of the two roles (plus the server owner); DMs are off
+  const cfg = dcLoad(); cfg.channels = [askId]; cfg.roles = [ids.bot, ids.team]; cfg.ownerId = guild.owner_id; cfg.dm = false; dcSave();
+  return { guild, made, kept, unpinned, ownerTagged, askId };
+}
+async function dcServerCmd(val) {
+  if (!dcToken()) { out(C.yellow('  First give Panda your bot token: /discord setup explains how.')); return; }
+  if (val !== 'setup') {
+    out(C.bold('  What /discord server setup will build'));
+    for (const l of dcServerPlan()) out(l);
+    out(C.gray('  Each channel gets its own pinned note, #rules gets the server rules, and the bot answers only in #ask-panda.\n  Nothing that already exists is deleted or changed. Run:  ') + C.bamboo('/discord server setup'));
+    return;
+  }
+  try {
+    const me = await dcRest('GET', '/users/@me'); dc.botId = me.id; dc.botName = me.username;
+    const guilds = await dcRest('GET', '/users/@me/guilds');
+    if (!guilds.length) { out(C.yellow('  The bot is not in any server yet. Open this link, pick your server, then run this again:')); out('  ' + C.cyan(dcSetupInvite())); return; }
+    let g = guilds[0];
+    if (guilds.length > 1) { const i = await ui.select('  ' + C.bold('Which server?'), guilds.map(x => ({ label: x.name }))); if (i < 0) return; g = guilds[i]; }
+    for (const l of dcServerPlan()) out(l);
+    const ok = await ui.select('  ' + C.bold(`Build this in "${g.name}"?`) + C.gray(' (adds roles, channels and posts; deletes nothing)'), [{ label: 'Yes, build it' }, { label: 'No' }]);
+    if (ok !== 0) { out(C.gray('  (cancelled)')); return; }
+    const r = await dcBuildServer(g.id);
+    out(C.green(`  ✓ Done: created ${r.made.length} item(s) in ${r.guild.name}.`) + (r.kept.length ? C.gray(` Left as they were: ${r.kept.join(', ')}.`) : ''));
+    if (r.unpinned) out(C.yellow(`  ${r.unpinned} channel note(s) could not be pinned; pin them by hand.`));
+    if (r.kept.some(k => k.startsWith('#'))) out(C.yellow('  Channels that already existed keep their old permissions and got no note.'));
+    out(C.gray('  The bot now answers only in #ask-panda, only to members with "Panda Bot Access" or "Panda Team" (and you). DMs are off.'));
+    out(C.gray('  Give someone access: right-click their name in Discord → Roles → Panda Bot Access. Then run ') + C.bamboo('/discord on'));
+  } catch (e) {
+    const msg = String(e.message || e);
+    if (/ 403/.test(msg)) { out(C.red('  Discord refused: the bot does not have permission to build the server.')); out(C.gray('  Open this link and authorise it again (it adds Manage Channels and Manage Roles), then retry:')); out('  ' + C.cyan(dcSetupInvite())); }
+    else out(C.red('  Server setup stopped: ' + msg) + C.gray('  (running it again continues where it left off)'));
+  }
+}
 function dcStatusLines() {
   const cfg = dcLoad(), tok = dcToken(), L = [];
   const dot = dc.status === 'online' ? C.green('●') : dc.status === 'off' ? C.gray('○') : C.yellow('●');
   L.push(`  ${dot} ${C.bold('Discord bot')} ${C.gray(dc.status === 'online' ? `online as ${dc.botName} · ${dc.answered} answered` : dc.status + (cfg.enabled ? ' (set to start with Panda)' : ''))}`);
   L.push(C.gray(`    token: ${tok ? 'saved (…' + tok.slice(-4) + ')' : 'not set'} · webhook: ${cfg.webhook ? 'saved (…' + cfg.webhook.slice(-4) + ')' : 'not set'} · channels: ${cfg.channels.length ? cfg.channels.join(', ') : 'any'} · cooldown: ${cfg.cooldown ?? 10}s per person`));
+  L.push(C.gray(`    who can talk: ${cfg.roles.length ? 'only members with role ' + cfg.roles.join(' or ') : 'anyone'} · DMs: ${cfg.dm === false || (cfg.roles.length && cfg.dm !== true) ? 'off' : 'on'}`));
   L.push(C.gray(`    replies use the current model: ${state.model || '(none)'} · chat only: nobody on Discord can touch this PC`));
   if (dcInvite()) L.push(C.gray('    add it to a server: ') + C.cyan(dcInvite()));
   return L;
@@ -2723,7 +2875,8 @@ async function discordCmd(arg) {
         '  4. Panda prints an invite link: open it and add the bot to your server.',
         '  Then anyone can write  @YourBot what is Panda Code?  or DM it. It answers with whatever model Panda is using.',
         '  It is chat-only: Discord users cannot read files or run anything on this PC.',
-        '  Optional:  /discord channel <id>   limit it to one channel  ·  /discord cooldown <seconds>  ·  /discord webhook <url> + /discord say <text>  to post announcements.'].join('\n')));
+        '  Want a whole server built for you (channels, rules, permissions)?   /discord server',
+        '  Optional:  /discord role <id>  only that role may talk to it  ·  /discord channel <id>   limit it to one channel  ·  /discord cooldown <seconds>  ·  /discord webhook <url> + /discord say <text>  to post announcements.'].join('\n')));
       return;
     case 'token': {
       if (!val) { out(C.yellow('  Usage: /discord token <bot token>   (see /discord setup)')); return; }
@@ -2752,6 +2905,19 @@ async function discordCmd(arg) {
       if (!id) { out(C.yellow('  Use a channel ID (Discord: Settings → Advanced → Developer Mode, then right-click a channel → Copy Channel ID).')); return; }
       cfg.channels = cfg.channels.includes(id) ? cfg.channels.filter(c => c !== id) : cfg.channels.concat(id); dcSave();
       out(C.gray('  ⎿  channels: ') + (cfg.channels.length ? cfg.channels.join(', ') : 'any')); return;
+    }
+    case 'server': await dcServerCmd(val.toLowerCase()); return;
+    case 'role': {
+      if (!val || val === 'any' || val === 'clear') { cfg.roles = []; dcSave(); out(C.yellow('  ⎿  anyone who can see the channel can now talk to the bot')); return; }
+      const id = val.replace(/[^\d]/g, '');
+      if (!id) { out(C.yellow('  Use a role ID (Developer Mode on, then right-click the role → Copy Role ID), or /discord role clear.')); return; }
+      cfg.roles = cfg.roles.includes(id) ? cfg.roles.filter(r => r !== id) : cfg.roles.concat(id); dcSave();
+      out(C.gray('  ⎿  only these roles can talk to the bot: ') + (cfg.roles.length ? cfg.roles.join(', ') : 'anyone')); return;
+    }
+    case 'dm': {
+      if (val !== 'on' && val !== 'off') { out(C.yellow('  Usage: /discord dm on|off')); return; }
+      cfg.dm = val === 'on'; dcSave();
+      out(C.gray(`  ⎿  direct messages ${val}`) + (cfg.dm && cfg.roles.length ? C.yellow('  (note: roles cannot be checked in DMs, so anyone can DM the bot)') : '')); return;
     }
     case 'cooldown': { const n = parseInt(val, 10); if (!(n >= 0 && n <= 3600)) { out(C.yellow('  Usage: /discord cooldown <seconds>  (0 to 3600)')); return; } cfg.cooldown = n; dcSave(); out(C.gray(`  ⎿  each person can ask once every ${n}s`)); return; }
     case 'forget': dc.hist.clear(); out(C.gray('  ⎿  forgot all Discord conversations')); return;

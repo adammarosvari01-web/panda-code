@@ -56,6 +56,13 @@ On Linux and macOS the installer can apply the fix for you: `curl -fsSL https://
 3. `/discord off` turns it off. `/discord status` shows what it is doing.
 
 It is chat-only: people on Discord get no access to your files, shell or anything else on your PC. Each person can ask once every 10 seconds (`/discord cooldown <seconds>`), and `/discord channel <id>` limits it to one channel. With a webhook (`/discord webhook <url>`) you can also post announcements: `/discord say <text>`.
+### Build a whole server
+
+`/discord server` previews, and `/discord server setup` builds, an organised community server using your bot: roles (**Panda Team**, **Panda Bot Access**), information, community, support, bot and private team channels, server rules, and a pinned note in each channel. Nothing that already exists is deleted or changed.
+
+Information channels are read-only. The bot answers only in `#ask-panda`, only to members with one of the two roles (and the server owner), and direct messages are off. Adjust with `/discord role <id|clear>`, `/discord channel <id>` and `/discord dm on|off`.
+
+After setup you can remove the bot's Manage Channels and Manage Roles permissions in Discord's role settings; chatting does not need them.
 ## Learn mode
 
 ```
