@@ -13,7 +13,7 @@ const { StringDecoder } = require('string_decoder');
 const { setMaxListeners } = require('events'); // one Esc signal is shared by many steps of a long task
 const { Writable } = require('stream');
 
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -211,16 +211,20 @@ const spinner = {
     clearInterval(this.t); this.drawn = 0; this.t = setInterval(() => this.draw(), 110); this.draw();
   },
   set(label) { this.label = label; },
+  // the "◐ Pondering… (12s)" line, cut to the room there is so it never wraps and breaks the drawing
+  status(f, avail) {
+    const s = Math.floor((Date.now() - this.t0) / 1000);
+    const extra = this.tokens ? ` · ↓ ${fmtK(this.tokens)} tokens` : '';
+    let label = String(this.label), tail = ` (${s}s${extra} · esc to interrupt)`;
+    const make = () => C.bamboo(FRAMES[f % 4]) + ' ' + C.leaf(label + '…') + C.gray(tail);
+    if (dispW(make()) > avail) tail = ` (${s}s)`;
+    while (label.length > 1 && dispW(make()) > avail) label = label.slice(0, -1);
+    return dispW(make()) > avail ? C.bamboo(FRAMES[f % 4]) : make();
+  },
   // The animated block (status text + munching panda) as rows of a given width, for the pinned layout.
   block(W, H = 24) {
     const rows = pandaRows(Math.floor(H * 0.55), W), wide = rows * 2;
-    const avail = rows ? W - wide - 1 : W;
-    const s = Math.floor((Date.now() - this.t0) / 1000);
-    const extra = this.tokens ? ` · ↓ ${fmtK(this.tokens)} tokens` : '';
-    const f = this.i;
-    const head = C.bamboo(FRAMES[f % 4]) + ' ' + C.leaf(this.label + '…');
-    let text = head + C.gray(` (${s}s${extra} · esc to interrupt)`);
-    if (stripAnsi(text).length > avail) text = head + C.gray(` (${s}s)`);
+    const f = this.i, text = this.status(f, rows ? W - wide - 1 : W);
     if (!rows) return [text];
     return pandaFrame(f, rows).map((sp, idx) => { const left = idx === 1 ? text : ''; return left + ' '.repeat(Math.max(1, W - dispW(left) - wide)) + sp; });
   },
@@ -230,13 +234,7 @@ const spinner = {
     if (scr.on) return;
     const cols = (process.stdout.columns || 80) - 1;
     const rows = pandaRows(Math.floor(((process.stdout.rows || 24) - 4) * 0.55), cols), wide = rows * 2; // must stay shorter than the window
-    const avail = rows ? cols - wide - 1 : cols;
-    const s = Math.floor((Date.now() - this.t0) / 1000);
-    const extra = this.tokens ? ` · ↓ ${fmtK(this.tokens)} tokens` : '';
-    const f = this.i++;
-    const head = C.bamboo(FRAMES[f % 4]) + ' ' + C.leaf(this.label + '…');
-    let text = head + C.gray(` (${s}s${extra} · esc to interrupt)`);
-    if (stripAnsi(text).length > avail) text = head + C.gray(` (${s}s)`);
+    const f = this.i++, text = this.status(f, rows ? cols - wide - 1 : cols);
     let buf = (this.drawn > 1 ? `\x1b[${this.drawn - 1}A` : '') + '\r\x1b[J';
     if (rows) {
       const lines = pandaFrame(f, rows).map((sp, idx) => {
@@ -247,9 +245,10 @@ const spinner = {
     } else { buf += text; this.drawn = 1; }
     // what you are typing stays under the animation, so you can type (and queue the next message) while Panda works
     if (ui.rl && !ui.pending && !ui.inSelect) {
-      const typed = ui.rl.line || '';
-      let input = ui.promptStr() + typed;
-      if (dispW(input) >= cols) input = ui.promptStr() + '…' + typed.slice(-Math.max(8, cols - 16));
+      let typed = ui.rl.line || '', prompt = ui.promptStr();
+      if (dispW(prompt) >= cols - 4) prompt = C.bamboo('❯ ');
+      let input = prompt + typed;
+      if (dispW(input) >= cols) { do typed = typed.slice(1); while (typed && dispW(prompt + '…' + typed) >= cols); input = prompt + '…' + typed; }
       buf += '\n' + input; this.drawn++;
     }
     process.stdout.write(buf);
@@ -489,8 +488,6 @@ function paint() {
   }
   so.write(buf);
 }
-function drawHint() { schedulePaint(); }
-function drawView() { paint(); }
 function enterView() {
   if (scr.on || !hdr.on || ui.pending || ui.inSelect) return false;
   const g = geom();
@@ -548,7 +545,7 @@ function cleanCopied(t, partialFirst = false) {
     .replace(/^\s*(?:(?:[●○⎿▸❯✻◆☐☒│┃▌◐◓◑◒⏵⏸★])\s?)+/u, m => ' '.repeat(m.length)) // markers at the start of a line become plain indent
     .replace(/[─-▟⠀-⣿●⎿▸❯✻◆☐☒⏵⏸◐◓◑◒]|🐼|🎋|📎|🖼/gu, '')
     .replace(/^(\s*)• /, '$1- ')
-    .replace(/[​-‍⁠﻿️]/g, '').replace(/ /g, ' ')
+    .replace(/[\u200b-\u200d\u2060\ufeff]|\ufe0f/g, '').replace(/\u00a0/g, ' ')
     .replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, '')
     .replace(/\s+$/, ''));
   // remove the indent every line shares (Panda indents its answers); a first line that was only partly selected doesn't count
@@ -686,10 +683,6 @@ function installInputFilter() {
   process.stdin.emit = function (ev, ...a) {
     if (ev !== 'data') return orig.call(this, ev, ...a);
     let s = held + (Buffer.isBuffer(a[0]) ? dec.write(a[0]) : String(a[0])); held = '';
-    if (paste === null) { // a mouse report or paste marker cut in half between two reads waits for its other half
-      const cut = s.match(hdr.mouse ? /\x1b\[(?:<[\d;]*|20?0?)$/ : /\x1b\[20?0?$/);
-      if (cut) { held = cut[0]; s = s.slice(0, -held.length); }
-    }
     const keys = t => {
       if (hdr.mouse) t = t.replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (m, bt, x, y, k) => { onMouse(+bt, +x, +y, k === 'm'); return ''; });
       if (t) orig.call(process.stdin, 'data', Buffer.from(t, 'utf8'));
@@ -701,7 +694,11 @@ function installInputFilter() {
         if (e >= 0) { s = paste.slice(e + 6); const t = paste.slice(0, e); paste = null; clearTimeout(timer); onPaste(t); }
       } else {
         const i = s.indexOf('\x1b[200~'); // start of a paste
-        if (i < 0) { keys(s); s = ''; }
+        if (i < 0) { // a mouse report or paste marker cut in half between two reads waits for its other half
+          const cut = s.match(hdr.mouse ? /\x1b\[(?:<[\d;]*|20?0?)$/ : /\x1b\[20?0?$/);
+          if (cut) { held = cut[0]; s = s.slice(0, -held.length); }
+          keys(s); s = '';
+        }
         else {
           keys(s.slice(0, i)); paste = ''; s = s.slice(i + 6);
           clearTimeout(timer); timer = setTimeout(() => { if (paste !== null) { const t = paste; paste = null; onPaste(t); } }, 3000);
@@ -987,11 +984,13 @@ const TOOLS = {
       let before = '';
       if (exists) { assertRead(p); before = fs.readFileSync(p, 'utf8'); }
       fs.mkdirSync(path.dirname(p), { recursive: true });
-      fs.writeFileSync(p, String(a.content));
+      // a rewritten file keeps its Windows line endings (models write plain "\n")
+      const body = /\r\n/.test(before) && !/\r\n/.test(a.content) ? String(a.content).replace(/\n/g, '\r\n') : String(a.content);
+      fs.writeFileSync(p, body);
       markRead(p);
-      const n = String(a.content).split(/\r?\n/).length;
+      const n = body.split(/\r?\n/).length;
       if (exists) {
-        const d = diffDisplay(before, String(a.content), 20);
+        const d = diffDisplay(before, body, 20);
         return { content: `The file ${p} has been overwritten successfully.`, display: `Updated ${C.bold(rel(p))} with ${d.added} additions and ${d.removed} removals\n${d.text}` };
       }
       const lines = String(a.content).split(/\r?\n/);
@@ -1033,10 +1032,12 @@ const TOOLS = {
     },
     async run(a) {
       const p = abs(a.file_path);
+      if (!Array.isArray(a.edits) || !a.edits.length) throw new Error('edits must be a list with at least one {old_string, new_string}.');
+      if (a.edits.some(e => !e || typeof e.old_string !== 'string' || typeof e.new_string !== 'string')) throw new Error('Every edit needs old_string and new_string.');
       assertRead(p);
       const before = fs.readFileSync(p, 'utf8');
       let r = before;
-      (a.edits || []).forEach((e, i) => { try { r = applyEdit(r, String(e.old_string), String(e.new_string), !!e.replace_all); } catch (err) { throw new Error(`Edit #${i + 1} failed: ${err.message}`); } });
+      a.edits.forEach((e, i) => { try { r = applyEdit(r, String(e.old_string), String(e.new_string), !!e.replace_all); } catch (err) { throw new Error(`Edit #${i + 1} failed: ${err.message}`); } });
       fs.writeFileSync(p, r); markRead(p);
       const d = diffDisplay(before, r);
       return { content: `Applied ${a.edits.length} edits to ${p}.`, display: `Updated ${C.bold(rel(p))} with ${d.added} additions and ${d.removed} removals\n${d.text}` };
@@ -1692,6 +1693,21 @@ function printResult(ctx, display, color) {
   const lines = String(display || '').split('\n');
   lines.forEach((l, i) => out(ctx.indent + (i === 0 ? C.gray('  ⎿  ') : '     ') + (color ? color(l) : l)));
 }
+// Local models often send the right value in the wrong type ("false", "5", a list written as text). Turn it into what the
+// tool expects, so that for example replace_all: "false" does not count as yes.
+function coerceArgs(schema, value) {
+  const t = schema?.type;
+  if (typeof value === 'string') {
+    if (t === 'boolean' && /^(true|false)$/i.test(value.trim())) return value.trim().toLowerCase() === 'true';
+    if ((t === 'number' || t === 'integer') && value.trim() && Number.isFinite(Number(value))) return Number(value);
+    if ((t === 'array' || t === 'object') && /^\s*[[{]/.test(value)) { try { return coerceArgs(schema, JSON.parse(value)); } catch { return value; } }
+    return value;
+  }
+  if (t === 'string' && value !== null && value !== undefined) return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+  if (t === 'array' && Array.isArray(value) && schema.items) return value.map(v => coerceArgs(schema.items, v));
+  if (t === 'object' && value && typeof value === 'object' && !Array.isArray(value) && schema.properties) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, schema.properties[k] ? coerceArgs(schema.properties[k], v) : v]));
+  return value;
+}
 async function executeTool(call, ctx) {
   const tool = TOOLS[call.name];
   if (!tool || (ctx.tools && !ctx.tools.includes(call.name))) {
@@ -1701,6 +1717,7 @@ async function executeTool(call, ctx) {
   let a = call.args;
   if (typeof a === 'string') { try { a = JSON.parse(a || '{}'); } catch (e) { out(ctx.indent + C.red('● ') + C.bold(call.name) + C.red(' (malformed arguments)')); return { content: `Error: tool arguments were not valid JSON (${e.message}). Retry with valid JSON.` }; } }
   if (!a || typeof a !== 'object') a = {};
+  a = coerceArgs(tool.schema, a);
   if (call.name === 'ImageGen' && !a.file_path) a.file_path = defaultImagePath(a.prompt);
   if (ctx.toolUses !== undefined) ctx.toolUses++;
   let label = ''; try { label = tool.label(a) || ''; } catch { }
@@ -2728,7 +2745,6 @@ function detectHardware() {
   HW = { ramGB, gpus, vram, tier };
   return HW;
 }
-const resetHardware = () => { HW = null; };
 function describeHardware() {
   const h = detectHardware();
   const g = h.gpus.length ? h.gpus.map(x => `${x.name} ${Math.round(x.gb)} GB`).join(' + ') : 'no GPU found';
@@ -2835,6 +2851,7 @@ async function downloadAndSet(row) {
   return true;
 }
 function setModel(m) {
+  const previous = state.model;
   state.model = m.name;
   state.nativeTools = !m.caps || m.caps.includes('tools');
   state.vision = m.caps ? m.caps.includes('vision') : null;
@@ -2843,7 +2860,18 @@ function setModel(m) {
   saveConfig();
   drawHeader();
   out(C.gray('  ⎿  Model set to ') + C.bamboo(m.name) + (state.nativeTools ? '' : C.yellow(' (text-based tool calls)')));
-  if (state.interactive) warmModel();
+  if (state.interactive) unloadModel(previous).then(warmModel);
+}
+// Takes the model you switched away from off the graphics card. Left loaded, two models fill the memory and replies crawl.
+async function unloadModel(name) {
+  if (state.kind !== 'ollama' || !state.baseUrl || !name || normName(name) === normName(state.model) || (side.model && normName(side.model) === normName(name))) return;
+  const base = state.baseUrl.replace(/\/+$/, '');
+  try {
+    const ps = await (await fetch(base + '/api/ps', { headers: authHeaders(), signal: AbortSignal.timeout(5000) })).json();
+    if (!(ps.models || []).some(x => normName(x.name || x.model || '') === normName(name))) return;
+    warmKey = ''; // it has to be loaded again if you switch back
+    await (await fetch(base + '/api/generate', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ model: name, keep_alive: 0 }), signal: AbortSignal.timeout(30000) })).text();
+  } catch { }
 }
 // Loads the chosen model ahead of time with the same context size every request uses (a different size would make Ollama reload it),
 // then says so if part of it had to go on the processor, which is many times slower.
@@ -2860,6 +2888,10 @@ function warmModel() {
       const m = (ps.models || []).find(x => normName(x.name || x.model || '') === normName(model));
       if (m && m.size && m.size_vram !== undefined && m.size_vram < m.size * 0.95 && state.model === model)
         out(C.yellow(`  ⚠ Only ${Math.round(100 * m.size_vram / m.size)}% of ${model} fits on the graphics card, so replies are slow. A smaller /ctx or a smaller /model will be much faster.`));
+      // models left loaded by an earlier session or another program can fill the card, which slows everything to a crawl
+      const others = (ps.models || []).filter(x => x !== m && x.size_vram > 0), card = detectHardware().vram * 1073741824;
+      if (m && others.length && card > 0 && (ps.models || []).reduce((a, x) => a + (x.size_vram || 0), 0) > card * 0.85 && state.model === model)
+        out(C.yellow(`  ⚠ ${others.map(x => x.name || x.model).join(', ')} is also loaded and the graphics card is almost full, so replies may be very slow. Free it with: ${others.map(x => 'ollama stop ' + (x.name || x.model)).join(' ; ')}`));
     }).catch(() => { warmKey = ''; });
 }
 // ───────────────────────────── updates ─────────────────────────────
@@ -3788,7 +3820,27 @@ public static class PandaDesk {
   static void Check() { if (stopped) throw new Exception("stopped"); }
   static void Send(INPUT i) { INPUT[] a = new INPUT[] { i }; if (SendInput(1, a, Marshal.SizeOf(typeof(INPUT))) != 1) throw new Exception("Windows blocked the input (a program running as administrator may be in front)"); }
   static void Mouse(uint flags, int data) { INPUT i = new INPUT(); i.type = 0; i.u.mi.flags = flags; i.u.mi.mouseData = data; Send(i); }
-  static void Move(int x, int y) {
+  // The mouse always travels to where it is going, like a hand: it starts gently, slows into the target and never jumps.
+  static double GlideMs(double distance, int atLeast) { return Math.Max(atLeast, Math.Min(750.0, 160 + distance * 0.3)); }
+  static POINT Along(POINT from, int x, int y, double t) {
+    double k = t >= 1 ? 1 : t * t * t * (10 - 15 * t + 6 * t * t);
+    POINT p; p.X = from.X + (int)Math.Round((x - from.X) * k); p.Y = from.Y + (int)Math.Round((y - from.Y) * k); return p;
+  }
+  static double Dist(POINT a, int x, int y) { double dx = x - a.X, dy = y - a.Y; return Math.Sqrt(dx * dx + dy * dy); }
+  static void Move(int x, int y) { Move(x, y, 0); }
+  static void Move(int x, int y, int atLeast) {
+    Check();
+    POINT from; GetCursorPos(out from);
+    if (Dist(from, x, y) >= 1) {
+      double ms = GlideMs(Dist(from, x, y), atLeast);
+      System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+      while (clock.Elapsed.TotalMilliseconds < ms) {
+        Check();   // Esc stops the mouse mid-way
+        POINT s = Along(from, x, y, clock.Elapsed.TotalMilliseconds / ms);
+        SetCursorPos(s.X, s.Y); Mouse(0x0001, 0);
+        Thread.Sleep(7);
+      }
+    }
     Check();
     SetCursorPos(x, y); SetCursorPos(x, y); Mouse(0x0001, 0);
     POINT p; GetCursorPos(out p);
@@ -3807,7 +3859,7 @@ public static class PandaDesk {
   }
   static void Drag(int x1, int y1, int x2, int y2) {
     Move(x1, y1); Thread.Sleep(80); uint[] f = Button("left"); Mouse(f[0], 0);
-    try { for (int i = 1; i <= 20; i++) { Thread.Sleep(15); Move(x1 + (x2 - x1) * i / 20, y1 + (y2 - y1) * i / 20); } Thread.Sleep(80); }
+    try { Thread.Sleep(40); Move(x2, y2, 400); Thread.Sleep(80); }   // a drag is never quicker than programs can follow
     finally { Mouse(f[1], 0); }
   }
   static void Key(ushort vk, bool up) {
@@ -3930,6 +3982,12 @@ public static class PandaDesk {
           case "type": Type(Encoding.UTF8.GetString(Convert.FromBase64String(a[2]))); break;
           case "key": Combo(Encoding.UTF8.GetString(Convert.FromBase64String(a[2]))); break;
           case "cursor": { POINT p; GetCursorPos(out p); res = p.X + "," + p.Y; } break;
+          case "path": {   // the points a glide would pass through; nothing moves
+            POINT from; from.X = int.Parse(a[2]); from.Y = int.Parse(a[3]);
+            int tx = int.Parse(a[4]), ty = int.Parse(a[5]); double ms = GlideMs(Dist(from, tx, ty), int.Parse(a[6]));
+            List<string> pts = new List<string>(); for (double at = 0; at < ms + 7; at += 7) { POINT s = Along(from, tx, ty, at / ms); pts.Add(s.X + "," + s.Y); }
+            res = ((int)ms) + ";" + string.Join(";", pts.ToArray());
+          } break;
           case "elements": res = Elements(int.Parse(a[2])); break;
           case "ispassword": res = IsPassword(); break;
           case "foreground": { IntPtr h = GetForegroundWindow(); StringBuilder sb = new StringBuilder(200); GetWindowText(h, sb, 200); res = h.ToInt64() + "\t" + sb.ToString().Replace('\t', ' '); } break;
@@ -4042,12 +4100,14 @@ async function ctlShot() {
   const [x, y, w, h, iw, ih, mx, my, fps] = meta.split(',').map(Number);
   return { x, y, w, h, iw, ih, mx, my, fps, data };
 }
+// taskbar buttons are labelled "Firefox - 1 running window"; the program is just "Firefox"
+const ctlAppName = s => String(s).replace(/\s+-\s+\d+ running windows?$/i, '').replace(/\s+pinned$/i, '');
 // screen pixels <-> the 0..1000 grid the model points with
 const ctlToScreen = (s, nx, ny) => ({ x: s.x + Math.min(s.w - 1, Math.max(0, Math.round(nx / 1000 * s.w))), y: s.y + Math.min(s.h - 1, Math.max(0, Math.round(ny / 1000 * s.h))) });
 const ctlToGrid = (s, px, py) => ({ x: Math.round((px - s.x) / s.w * 1000), y: Math.round((py - s.y) / s.h * 1000) });
 async function ctlElements(shot) {
   let raw = ''; try { raw = Buffer.from(await desk.call('elements 60', 8000), 'base64').toString('utf8'); } catch { return []; }
-  return raw.split('\n').filter(Boolean).map((l, i) => { const [kind, label, x, y, w, h] = l.split('|'), name = maskSecret(label); const cx = +x + Math.floor(+w / 2), cy = +y + Math.floor(+h / 2); return { no: i + 1, kind, name, cx, cy, ...(({ x: gx, y: gy }) => ({ gx, gy }))(ctlToGrid(shot, cx, cy)) }; });
+  return raw.split('\n').filter(Boolean).map((l, i) => { const [kind, label, x, y, w, h] = l.split('|'), name = ctlAppName(maskSecret(label));const cx = +x + Math.floor(+w / 2), cy = +y + Math.floor(+h / 2); return { no: i + 1, kind, name, cx, cy, ...(({ x: gx, y: gy }) => ({ gx, gy }))(ctlToGrid(shot, cx, cy)) }; });
 }
 // models often fill in 0,0 when they mean "no position", which would hit the top left corner
 const ctlHasXY = a => Number.isFinite(a.x) && Number.isFinite(a.y) && !(a.x === 0 && a.y === 0);
@@ -4113,7 +4173,7 @@ async function ctlAct(a, c) {
       return `press ${k}`;
     }
     case 'open_app': {
-      const name = String(a.text || a.target || '').replace(/[\r\n]+/g, ' ').trim().slice(0, 80); if (!name) throw new Error('open_app needs the program name in "text"');
+      const name = ctlAppName(String(a.text || a.target || '').replace(/[\r\n]+/g, ' ').trim()).slice(0, 80); if (!name) throw new Error('open_app needs the program name in "text"');
       await desk.call('key ' + ctlB64('win')); await ctlSleep(700, signal);
       await desk.call('type ' + ctlB64(name)); await ctlSleep(900, signal);
       await desk.call('key ' + ctlB64('enter')); await ctlSleep(1200, signal);
@@ -4146,7 +4206,7 @@ async function ctlConfirm(task, signal) {
     out('  ' + C.bold('You asked: ') + request.replace(/\n/g, ' · '));
     if (plan?.understood) out('  ' + C.bold('I understood: ') + C.leaf(plan.understood));
     (Array.isArray(plan?.steps) ? plan.steps : []).slice(0, 8).forEach((s, i) => out(C.gray(`    ${i + 1}. ${s}`)));
-    const pick = await ui.select('  ' + C.bold('Is that right?') + C.gray(' Once started, press Esc at any moment to stop me.'), [{ label: 'Yes, do it' }, { label: 'No, let me correct it' }, { label: 'Cancel' }]);
+    const pick = await ui.select('  ' + C.bold('Is that right?') + C.gray(' I only ask this once per conversation. Esc stops me at any moment.'), [{ label: 'Yes, do it' }, { label: 'No, let me correct it' }, { label: 'Cancel' }]);
     if (pick === 0) return { request, plan };
     if (pick !== 1) return null;
     const fix = (await ui.ask(C.bamboo('  what should be different? ❯ '))).trim();
@@ -4168,10 +4228,16 @@ async function computerTask(task, ac) {
   const why = ctlBlocked(); if (why) return { ok: false, text: why };
   const signal = ac.signal;
   setMaxListeners(0, signal);
-  let ok;
-  try { ok = await ctlConfirm(task, signal); }
-  catch (e) { if (signal.aborted || e.name === 'AbortError') return { ok: false, stopped: true, text: 'Stopped before anything on the computer was touched.' }; throw e; }
-  if (!ok) return { ok: false, stopped: true, text: 'Cancelled: nothing on the computer was touched.' };
+  // Panda checks it understood the first computer task of a conversation. After your yes it does not ask again (/clear starts over).
+  let ok = null;
+  if (session.ctlConfirmed) { ok = { request: task }; out('  ' + C.bold('On it: ') + task.replace(/\n/g, ' · ') + C.gray(' (Esc stops me)')); }
+  else {
+    try { ok = await ctlConfirm(task, signal); }
+    catch (e) { if (signal.aborted || e.name === 'AbortError') return { ok: false, stopped: true, text: 'Stopped before anything on the computer was touched.' }; throw e; }
+    if (!ok) return { ok: false, stopped: true, text: 'Cancelled: nothing on the computer was touched.' };
+    session.ctlConfirmed = true;
+  }
+  if (/(^|[^\d.])(0\.\d+|[1-4](\.\d+)?)b\b/i.test(state.model)) out(C.yellow(`  ⎿  ${state.model} is a small model and often misreads the screen. A larger vision model (/model) is far more reliable.`));
   let escaped = false, hwnd = '';
   const log = [], c = { misses: new Map(), signal, zoom: null, screen: state.computerScreen || 'primary' };
   const done = (okay, text, extra = {}) => ({ ok: okay, text: text + (log.length ? `\nSteps taken:\n${log.join('\n')}` : ''), ...extra });
@@ -4244,7 +4310,10 @@ async function computerTask(task, ac) {
   }
 }
 // "control my computer to ..." and /computer: run the task and keep it in the conversation
-const CTL_REQUEST = /^(?:(?:please|pls|can you|could you|hey|hey panda|panda|ok|okay|now)[,\s]+)*(?:control|take (?:control|over)(?: of)?|use(?=\s+(?:my|the|this)\s+(?:computer|pc|mouse)))\s+(?:my|the|this)\s+(?:computer|pc|desktop|screen|mouse(?:\s+and\s+keyboard)?)(?:\s*$|\s*[,:\-]\s*|\s+(?:and|to|so that you|so you|for me to|for me and)\s+)([\s\S]*)$/i;
+const CTL_REQUEST = /^(?:(?:please|pls|can you|could you|hey|hey panda|panda|ok|okay|now)[,\s]+)*(?:(?:control|take (?:control|over)(?: of)?|use(?=\s+(?:my|the|this)\s+(?:computer|pc|mouse)))\s+(?:my|the|this)\s+(?:computer|pc|desktop|screen|mouse(?:\s+and\s+keyboard)?)|use\s+(?:the\s+)?computer\s+control(?=\s*$|\s*[,:\-]|\s+(?:to|and)\s))(?:\s*$|\s*[,:\-]\s*|\s+(?:and|to|so that you|so you|for me to|for me and)\s+)([\s\S]*)$/i;
+// greetings and small talk: whatever the model thinks, these are never a request to take over the computer
+const SMALL_TALK = /^\s*(?:(?:h+i+|h+e+y+|hello+|hiya|yo|sup|howdy|thanks?|thank you|thx|cool|nice|great|awesome|lol|bye|goodbye|good (?:morning|afternoon|evening|night)|how are (?:you|u)(?: doing)?|what'?s up|wassup)(?:[\s,]+(?:there|panda|mate|bro|man|again))?[\s!.?,]*)+$/i;
+const lastUserText = () => { for (let i = session.messages.length - 1; i >= 0; i--) { const x = session.messages[i]; if (x.role === 'user' && !String(x.content).startsWith('[')) return String(x.content); } return ''; };
 async function runComputer(task) {
   const blocked = ctlBlocked();
   if (blocked) { out(C.yellow('  ' + blocked)); return; }
@@ -4262,11 +4331,12 @@ async function runComputer(task) {
 }
 if (IS_WIN) TOOLS.ComputerControl = {
   perm: null,
-  description: 'Does a task on the user\'s Windows PC by seeing the screen and using the mouse and keyboard. Call it only when the user asks you to do something on their computer\'s screen or in a desktop program. Panda confirms the task with the user first. Needs bypass permissions to be on.',
+  description: 'Does a task on the user\'s Windows PC by seeing the screen and using the mouse and keyboard. Call it only when the user\'s LATEST message asks you to do something on their computer\'s screen or in a desktop program; never for greetings, chat or questions you can simply answer. Needs bypass permissions to be on.',
   schema: { type: 'object', properties: { task: P('string', 'What the user asked for, in their own words with all details') }, required: ['task'] },
   label: a => String(a.task || '').slice(0, 70),
   async run(a) {
     const blocked = ctlBlocked(); if (blocked) return { content: blocked + ' Tell the user exactly this and do not attempt it another way.', display: C.yellow(blocked) };
+    if (SMALL_TALK.test(lastUserText())) return { content: 'Not run: the user only said "' + lastUserText().trim().slice(0, 60) + '" and did not ask for anything on their computer. Just reply to them.', display: C.gray('not run: you did not ask for anything on screen') };
     const r = await computerTask(String(a.task), ui.abort || new AbortController());
     return { content: r.text, display: (r.ok ? C.green('✓ ') : C.yellow('■ ')) + r.text.split('\nSteps taken:')[0], stop: r.stopped };
   },
@@ -4278,7 +4348,7 @@ async function computerCmd(arg) {
   if (sub === 'window') { if (val !== 'keep' && val !== 'hide') { out(C.yellow('  Usage: /computer window hide|keep')); return; } state.computerKeepWindow = val === 'keep'; saveConfig(); out(C.gray(`  ⎿  while working, this window is ${val === 'keep' ? 'left where it is' : 'minimised'}`)); return; }
   if (sub) { await runComputer(arg); return; }
   out(C.bold('  Computer control') + C.gray(state.mode === 'bypass' ? ' · ready' : ' · off (needs /bypasspermissions)'));
-  out(C.gray(`  Say "control my computer to ..." or /computer <task>. Panda confirms it first. Esc stops everything, from any window.\n  Screen: ${state.computerScreen || 'primary'} · seen at ${state.computerRes || 480}p, 30 fps · this window: ${state.computerKeepWindow ? 'kept' : 'minimised while working'}\n  /computer screen primary|all|1|2 · /computer res 480|720|1080 · /computer window hide|keep`));
+  out(C.gray(`  Say "control my computer to ..." or /computer <task>. Panda confirms the first one per conversation. Esc stops everything.\n  Screen: ${state.computerScreen || 'primary'} · seen at ${state.computerRes || 480}p, 30 fps · this window: ${state.computerKeepWindow ? 'kept' : 'minimised while working'}\n  /computer screen primary|all|1|2 · /computer res 480|720|1080 · /computer window hide|keep`));
 }
 
 const HELP = () => `
@@ -4494,6 +4564,7 @@ function parseArgs(argv) {
     else if (a === '-r' || a === '--resume') o.resume = true;
     else if (a === '--setup') o.setup = true;
     else if (a === '--no-pin') process.env.PANDA_NO_PIN = '1';
+    else if (/^--[a-z]/i.test(a) && !o._.length) o.unknown = a; // a mistyped option must not be sent to the model as a prompt
     else o._.push(a);
   }
   return o;
@@ -4522,6 +4593,7 @@ Usage: pandacode [options] [prompt]      (or: panda)
 Env: PANDA_URL, PANDA_MODEL, PANDA_API_KEY, OLLAMA_HOST`);
     return;
   }
+  if (args.unknown) { console.error(args.unknown === '--yolo' ? '--yolo has been renamed to --bypass-permissions' : `Unknown option ${args.unknown}. See pandacode --help`); process.exit(1); }
   const cfg = loadConfig();
   Object.assign(state, {
     kind: cfg.kind || 'ollama', baseUrl: cfg.baseUrl || '', apiKey: cfg.apiKey || '', model: cfg.model || '', providerName: cfg.providerName || 'Custom',

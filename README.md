@@ -52,8 +52,8 @@ control my computer to open Notepad and write a shopping list
 
 Needs a model that can see images (marked "vision" in `/model`) and **bypass permissions** on. With it off, Panda says it cannot do it.
 
-1. Panda repeats your request and its plan, and waits for your yes.
-2. It shares your screen with the local model (captured at 30 fps, seen at 480p, with no border on screen), minimises its own window, then clicks and types. The model looks at the newest frame at every step; no local model can process all 30 frames each second.
+1. For the first computer task in a conversation, Panda repeats your request and its plan and waits for your yes. After that it starts straight away; `/clear` makes it ask once more.
+2. It shares your screen with the local model (captured at 30 fps, seen at 480p, with no border on screen), minimises its own window, then moves the mouse smoothly (it never jumps), clicks and types. The model looks at the newest frame at every step; no local model can process all 30 frames each second.
 3. Items Windows can describe are clicked at their exact centre. Anything else is checked in a full-resolution close-up before the click.
 4. **Press Esc at any time, in any window**, and everything stops at once.
 
