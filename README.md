@@ -33,6 +33,34 @@ Then open a new terminal and run `pandacode` (or `panda`).
 If Ollama has no models yet, Panda shows the models that fit **this PC**, best first, least suitable last, and downloads the one you pick.
 Use `/model` any time to switch. Type `/help` for everything else.
 
+## Copy and paste
+
+Drag with the mouse to copy: you get plain text only, without colours, symbols or false line breaks. Right-click pastes. Pasted text is always inserted as plain text, and a multi-line paste goes in as one block that is sent when you press Enter. `/copy` copies the last reply and `/copy code` its last code block. `/mouse off` gives the mouse back to your terminal.
+
+You can keep typing while Panda works; press Enter to queue the message.
+
+## Memory
+
+Say `remember that I prefer short answers` and Panda keeps it for every future conversation. It also saves lasting preferences you mention. `/memory` lists what it knows, `/memory forget 2` removes one, `/memory off` switches it off. It is stored in `~/.panda/memory.json`, and Panda refuses to store things that look like passwords or keys.
+
+## Computer control (Windows)
+
+```
+/bypasspermissions
+control my computer to open Notepad and write a shopping list
+```
+
+Needs a model that can see images (marked "vision" in `/model`) and **bypass permissions** on. With it off, Panda says it cannot do it.
+
+1. Panda repeats your request and its plan, and waits for your yes.
+2. It shares your screen with the local model (captured at 30 fps, seen at 480p, with no border on screen), minimises its own window, then clicks and types. The model looks at the newest frame at every step; no local model can process all 30 frames each second.
+3. Items Windows can describe are clicked at their exact centre. Anything else is checked in a full-resolution close-up before the click.
+4. **Press Esc at any time, in any window**, and everything stops at once.
+
+`/computer screen 2|all`, `/computer res 720` (sharper, slower), `/computer window keep`.
+
+**Be careful:** a model controlling your PC can make mistakes. Close anything sensitive, stay nearby, and do not use it for payments or irreversible actions. Panda will not type into password boxes. Esc and clicks may not reach programs running as administrator.
+
 ## Update
 
 ```
