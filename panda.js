@@ -13,7 +13,7 @@ const { StringDecoder } = require('string_decoder');
 const { setMaxListeners } = require('events'); // one Esc signal is shared by many steps of a long task
 const { Writable } = require('stream');
 
-const VERSION = '1.2.1';
+const VERSION = '1.3.0';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -950,6 +950,7 @@ const TOOLS = {
         const img = loadImage(p);
         return { content: `Image ${img.name} (${imgKB(img)}) is attached in the next message so you can look at it.`, images: [img], display: `Read image ${C.bold(img.name)} (${imgKB(img)})` };
       }
+      if (VIDEO_FILE.test(p) || SOUND_FILE.test(p)) return { content: `${p} is a video or sound file. Use VideoInfo for its details, VideoFrames to look at it and VideoRender to edit it.`, display: 'Media file' };
       if (st.size > 50 * 1024 * 1024) throw new Error(`File is too large (${st.size} bytes).`);
       const buf = fs.readFileSync(p);
       if (!ctx.side) markRead(p);
@@ -1719,6 +1720,7 @@ async function executeTool(call, ctx) {
   if (!a || typeof a !== 'object') a = {};
   a = coerceArgs(tool.schema, a);
   if (call.name === 'ImageGen' && !a.file_path) a.file_path = defaultImagePath(a.prompt);
+  if (call.name === 'VideoRender') a.file_path = String(a.output || a.project || 'video.mp4'); // what the permission question shows
   if (ctx.toolUses !== undefined) ctx.toolUses++;
   let label = ''; try { label = tool.label(a) || ''; } catch { }
   out(ctx.indent + C.bamboo('● ') + C.bold(call.name) + (label ? C.gray('(') + label + C.gray(')') : ''));
@@ -1927,6 +1929,7 @@ Model: ${curModel()}${projectSnapshot(opts)}`;
   if (state.mode === 'plan' && !opts.sub) s += `\n\n# PLAN MODE IS ACTIVE\nThe user wants a plan before any changes. You MUST NOT edit files, write files or run commands that change anything. Research with read-only tools (Read, Glob, Grep, LS, WebFetch, WebSearch), then call ExitPlanMode with a concise plan. Do not make changes until the plan is approved.`;
   if (opts.sub) s += `\n\n# Sub-agent\nYou are a sub-agent launched to complete one task. Work autonomously with your tools, then reply with a single, complete final report of your findings or results (include file paths and key details). The report is returned to the main agent, not the user.`;
   const pi = projectInstructions();
+  if (!opts.sub) s += '\n\n# Video and audio\nTo edit or inspect video and sound files use the VideoInfo, VideoFrames and VideoRender tools, not shell commands. Look at a file with VideoInfo before cutting it, never invent file names, and say where the result was saved.';
   if (!opts.sub) s += memoryPrompt();
   if (!opts.sub && IS_WIN) s += '\n\n# Controlling the computer\n' + (state.mode === 'bypass'
     ? 'Bypass permissions is on. When the user asks you to do something on their computer\'s screen (open a program, click, type into an app, change something in a window), call ComputerControl with their request in their own words. Do not do it with shell commands instead unless that is what they asked for.'
@@ -2345,7 +2348,7 @@ async function handleBtw(arg) {
   askSide(a).catch(e => out(C.red('  ⎿  ' + (e.message || e)))); // runs in the background; the main prompt stays free
 }
 
-const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/bypasspermissions', '/computer', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/discord', '/learn', '/copy', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
+const SLASH = ['/help', '/clear', '/compact', '/model', '/models', '/provider', '/mode', '/plan', '/bypasspermissions', '/computer', '/ctx', '/fast', '/pin', '/mouse', '/paste', '/btw', '/flaws', '/imagine', '/undo', '/update', '/doctor', '/discord', '/learn', '/video', '/copy', '/think', '/init', '/todos', '/cost', '/status', '/resume', '/cd', '/bashes', '/tools', '/memory', '/config', '/exit'];
 const ui = {
   ghost: '', skipTab: false, menuLines: null, inSelect: false,
   rl: null, pending: null, queue: [], busy: false, lines: [], timer: null, cont: '', lastSig: 0, abort: null, handler: null,
@@ -2532,7 +2535,7 @@ const ui = {
       const sp = line.indexOf(' ');
       if (sp < 0) return pick(SLASH, line);
       const cmd = line.slice(0, sp).toLowerCase(), arg = line.slice(sp + 1);
-      const opts = { '/mode': ['default', 'acceptEdits', 'plan', 'bypass'], '/think': ['on', 'off', 'auto', 'show', 'hide'], '/pin': ['on', 'off'], '/mouse': ['on', 'off'], '/ctx': ['32768', '65536', '131072'], '/btw': ['agent', 'model', 'close', 'clear', 'refresh', 'stop'], '/discord': ['setup', 'on', 'off', 'status', 'server', 'token', 'webhook', 'say', 'channel', 'role', 'dm', 'cooldown', 'forget'], '/memory': ['add', 'forget', 'clear', 'on', 'off'], '/copy': ['code'], '/computer': ['screen', 'res', 'window'], '/model': state.modelNames || [] }[cmd];
+      const opts = { '/mode': ['default', 'acceptEdits', 'plan', 'bypass'], '/think': ['on', 'off', 'auto', 'show', 'hide'], '/pin': ['on', 'off'], '/mouse': ['on', 'off'], '/ctx': ['32768', '65536', '131072'], '/btw': ['agent', 'model', 'close', 'clear', 'refresh', 'stop'], '/discord': ['setup', 'on', 'off', 'status', 'server', 'token', 'webhook', 'say', 'channel', 'role', 'dm', 'cooldown', 'forget'], '/memory': ['add', 'forget', 'clear', 'on', 'off'], '/copy': ['code'], '/computer': ['screen', 'res', 'window'], '/video': ['setup', 'info', 'render'],'/model': state.modelNames || [] }[cmd];
       if (opts && !arg.includes(' ')) { const r = pick(opts, arg); if (r) return r; }
     }
     const at = line.match(/(^|\s)@([^\s]+)$/);
@@ -2645,6 +2648,7 @@ function expandMentions(text) {
       const st = fs.statSync(f);
       if (st.isFile() && IMG_EXT[path.extname(f).toLowerCase()]) addImage(f);
       else if (st.isDirectory()) { extra.push(`<directory path="${f}">\n${fs.readdirSync(f).slice(0, 200).join('\n')}\n</directory>`); out(C.gray(`  ⎿  Listed ${rel(f)}`)); }
+      else if (VIDEO_FILE.test(f) || SOUND_FILE.test(f)) { extra.push(`<media_file path="${f}">Inspect it with VideoInfo; edit it with VideoRender.</media_file>`); out(C.gray(`  ⎿  Media file ${rel(f)}`)); }
       else if (st.size < 300000) {
         const t = fs.readFileSync(f, 'utf8'); markRead(f);
         extra.push(`<file path="${f}">\n${t.split(/\r?\n/).map((l, i) => `${String(i + 1).padStart(6)}\t${l}`).join('\n')}\n</file>`);
@@ -3654,6 +3658,502 @@ async function setupProvider(force) {
   return true;
 }
 
+// ───────────────────────────── video editing: a timeline (tracks of clips, overlays, titles and sound) rendered by FFmpeg ─────────────────────────────
+// Editing is non-destructive: source files are only read. Each render saves its timeline as JSON, which can be changed and rendered again.
+const NO_FFMPEG = 'Video editing needs FFmpeg, which is not installed on this computer. The user can install it with /video setup.';
+const VIDEO_FILE = /\.(mp4|mov|mkv|webm|avi|m4v|wmv|flv|mpe?g|m2ts|3gp)$/i, SOUND_FILE = /\.(mp3|wav|m4a|aac|flac|ogg|opus|wma)$/i, STILL_FILE = /\.(png|jpe?g|webp|bmp|tiff?)$/i;
+let FF = null;
+function findProgram(name) {
+  const exe = IS_WIN ? name + '.exe' : name;
+  const dirs = process.env.PANDA_FFMPEG_DIR ? [process.env.PANDA_FFMPEG_DIR] : (process.env.PATH || '').split(path.delimiter);
+  if (!process.env.PANDA_FFMPEG_DIR) {
+    if (IS_WIN && process.env.LOCALAPPDATA) { // where winget puts it (a terminal opened before the install does not have it on its PATH yet)
+      const wg = path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet');
+      dirs.push(path.join(wg, 'Links'));
+      try { for (const p of fs.readdirSync(path.join(wg, 'Packages'))) if (/ffmpeg/i.test(p)) for (const v of fs.readdirSync(path.join(wg, 'Packages', p))) dirs.push(path.join(wg, 'Packages', p, v, 'bin')); } catch { }
+    } else if (!IS_WIN) dirs.push('/opt/homebrew/bin', '/usr/local/bin', '/usr/bin');
+  }
+  for (const d of dirs) { if (!d) continue; const f = path.join(d.replace(/^"|"$/g, ''), exe); try { if (fs.statSync(f).isFile()) return f; } catch { } }
+  return null;
+}
+function ffTools() {
+  if (!FF) { const ffmpeg = findProgram('ffmpeg'), ffprobe = findProgram('ffprobe'); if (ffmpeg && ffprobe) FF = { ffmpeg, ffprobe }; }
+  if (!FF) throw new Error(NO_FFMPEG);
+  return FF;
+}
+const abortError = () => Object.assign(new Error('aborted'), { name: 'AbortError' });
+function runProgram(bin, args, { signal, cwd, onOut, keepOut = true } = {}) {
+  return new Promise((res, rej) => {
+    if (signal?.aborted) return rej(abortError());
+    const p = cp.spawn(bin, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = '', e = '';
+    const stop = () => killTree(p);
+    signal?.addEventListener('abort', stop, { once: true });
+    p.stdout.setEncoding('utf8'); p.stderr.setEncoding('utf8');
+    p.stdout.on('data', d => { if (onOut) onOut(d); if (keepOut) o += d; });
+    p.stderr.on('data', d => { e += d; if (e.length > 400000) e = e.slice(-300000); });
+    p.on('error', rej);
+    p.on('close', code => { signal?.removeEventListener('abort', stop); if (signal?.aborted) rej(abortError()); else res({ code, out: o, err: e }); });
+  });
+}
+// "75", "1:15", "00:01:15.5", "1m15s" → seconds. A negative value counts back from the end.
+function videoTime(v, what = 'time', length) {
+  if (v === undefined || v === null || v === '') return undefined;
+  let s = String(v).trim().toLowerCase(), sign = 1, n = NaN;
+  if (s.startsWith('-')) { sign = -1; s = s.slice(1); }
+  if (/^\d+(\.\d+)?\s*(s|sec|secs|seconds?)?$/.test(s)) n = parseFloat(s);
+  else if (/^(\d+:)?\d+:\d+(\.\d+)?$/.test(s)) n = s.split(':').reduce((a, x) => a * 60 + parseFloat(x), 0);
+  else { const m = s.match(/^(?:(\d+)h)?\s*(?:(\d+)m(?:in)?)?\s*(?:(\d+(?:\.\d+)?)s)?$/); if (m && (m[1] || m[2] || m[3])) n = (+m[1] || 0) * 3600 + (+m[2] || 0) * 60 + (+m[3] || 0); }
+  if (!Number.isFinite(n)) throw new Error(`${what}: "${v}" is not a time. Use seconds (12.5) or mm:ss (1:05).`);
+  if (sign < 0) { if (length === undefined) throw new Error(`${what} cannot be negative here.`); return Math.max(0, length - n); }
+  return n;
+}
+const clock = s => { const m = Math.floor(s / 60), r = s - m * 60; return m ? `${m}:${r.toFixed(1).padStart(4, '0')}` : `${r.toFixed(1)}s`; };
+async function probeMedia(file, signal) {
+  let st; try { st = fs.statSync(file); } catch { throw new Error('File not found: ' + file); }
+  if (!st.isFile()) throw new Error('Not a file: ' + file);
+  const r = await runProgram(ffTools().ffprobe, ['-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', file], { signal });
+  if (r.code !== 0) throw new Error(`${path.basename(file)} is not a video, picture or sound file FFmpeg can read. ${r.err.trim().split('\n').pop() || ''}`);
+  const j = JSON.parse(r.out), streams = j.streams || [];
+  const v = streams.find(s => s.codec_type === 'video' && !s.disposition?.attached_pic), a = streams.find(s => s.codec_type === 'audio');
+  if (!v && !a) throw new Error(`${path.basename(file)} has no picture or sound.`);
+  const still = !!v && STILL_FILE.test(file);
+  const rate = x => { const [n, d] = String(x || '').split('/').map(Number); return n && d ? n / d : n || 0; };
+  const turn = Math.abs(Number(v?.side_data_list?.find(d => d.rotation !== undefined)?.rotation ?? v?.tags?.rotate ?? 0)) % 180 === 90;
+  return {
+    file, size: st.size, still, hasVideo: !!v, hasAudio: !!a,
+    duration: still ? undefined : Number(j.format?.duration) || Number(v?.duration) || Number(a?.duration) || 0,
+    width: v ? (turn ? v.height : v.width) : 0, height: v ? (turn ? v.width : v.height) : 0,
+    fps: v && !still ? rate(v.avg_frame_rate) || rate(v.r_frame_rate) : 0, vcodec: v?.codec_name, acodec: a?.codec_name, channels: a?.channels,
+  };
+}
+const mediaLine = m => [m.duration !== undefined ? clock(m.duration) : 'picture', m.hasVideo ? `${m.width}x${m.height}${m.fps ? ` ${Math.round(m.fps * 100) / 100} fps` : ''} (${m.vcodec})` : 'no picture', m.hasAudio ? `sound (${m.acodec}, ${m.channels} ch)` : 'no sound', `${(m.size / 1048576).toFixed(1)} MB`].join(' · ');
+// quiet stretches [{start, end}], used to cut out pauses
+async function findSilences(file, { signal, from = 0, to, noise = -35, min = 0.6 } = {}) {
+  const r = await runProgram(ffTools().ffmpeg, ['-hide_banner', '-nostats', ...(from ? ['-ss', String(from)] : []), ...(to !== undefined ? ['-t', String(to - from)] : []), '-i', file, '-vn', '-af', `silencedetect=noise=${noise}dB:d=${min}`, '-f', 'null', '-'], { signal });
+  const found = []; let open = null;
+  for (const m of r.err.matchAll(/silence_(start|end):\s*(-?\d+(?:\.\d+)?)/g)) { const t = Math.max(0, +m[2]) + from; if (m[1] === 'start') open = t; else if (open !== null) { found.push({ start: open, end: t }); open = null; } }
+  if (open !== null && to !== undefined) found.push({ start: open, end: to });
+  return found;
+}
+async function findScenes(file, signal) {
+  const r = await runProgram(ffTools().ffmpeg, ['-hide_banner', '-nostats', '-i', file, '-an', '-vf', "select='gt(scene,0.35)',showinfo", '-f', 'null', '-'], { signal });
+  return [...r.err.matchAll(/pts_time:(\d+(?:\.\d+)?)/g)].map(m => +m[1]).slice(0, 200);
+}
+const VIDEO_FILTERS = { grayscale: 'hue=s=0', blackandwhite: 'hue=s=0', sepia: 'colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131', warm: 'colorbalance=rs=.12:gs=.03:bs=-.12:rm=.08:bm=-.08', cool: 'colorbalance=rs=-.12:bs=.12:rm=-.08:bm=.08', vintage: 'curves=preset=vintage', cinematic: 'eq=contrast=1.1:saturation=0.9,colorbalance=rs=-.08:bs=.1:rh=.08:bh=-.08,vignette', vivid: 'eq=saturation=1.45:contrast=1.08', blur: 'gblur=sigma=6', sharpen: 'unsharp=5:5:1.0', vignette: 'vignette', mirror: 'hflip', flip: 'vflip', negative: 'negate', pixelate: 'scale=iw/16:ih/16:flags=neighbor,scale=iw*16:ih*16:flags=neighbor' };
+const DENOISE = 'afftdn=nr=20:nf=-25';
+// a mono recording is copied to both ears at full level (the default upmix makes it 3 dB quieter)
+const toStereo = m => [...(m.channels === 1 ? ['pan=stereo|c0=c0|c1=c0'] : []), 'aresample=48000', 'aformat=sample_fmts=fltp:channel_layouts=stereo'];
+const TRANSITIONS = ['fade', 'dissolve', 'fadeblack', 'fadewhite', 'wipeleft', 'wiperight', 'wipeup', 'wipedown', 'slideleft', 'slideright', 'slideup', 'slidedown', 'circleopen', 'circleclose', 'smoothleft', 'smoothright', 'pixelize', 'radial', 'zoomin'];
+const SPOTS = ['top-left', 'top', 'top-right', 'left', 'center', 'right', 'bottom-left', 'bottom', 'bottom-right'];
+const num = (v, what, lo, hi, dflt) => { if (v === undefined || v === null || v === '') return dflt; const n = Number(v); if (!Number.isFinite(n) || n < lo || n > hi) throw new Error(`${what} must be a number from ${lo} to ${hi} (got ${JSON.stringify(v)}).`); return n; };
+const f3 = n => String(Math.round(n * 1000) / 1000);
+const even = n => Math.max(2, Math.round(n / 2) * 2);
+function keyColor(c) { const s = String(c || 'green').trim().toLowerCase(); if (s === 'green') return '0x00FF00'; if (s === 'blue') return '0x0000FF'; const m = s.match(/^(?:#|0x)?([0-9a-f]{6})$/); if (!m) throw new Error(`key_color must be green, blue or a #RRGGBB colour (got "${c}").`); return '0x' + m[1].toUpperCase(); }
+function textColor(c) { const s = String(c || 'white').trim(); const m = s.match(/^#?([0-9a-f]{6})$/i); if (m) return '0x' + m[1]; if (/^[a-z]+(@(0?\.\d+|1|0))?$/i.test(s)) return s; throw new Error(`"${c}" is not a colour. Use a name (white, yellow) or #RRGGBB.`); }
+const tempoChain = s => { const out_ = []; while (s > 2) { out_.push('atempo=2'); s /= 2; } while (s < 0.5) { out_.push('atempo=0.5'); s *= 2; } if (Math.abs(s - 1) > 1e-6) out_.push('atempo=' + f3(s)); return out_; };
+function findFont(bold) {
+  const list = IS_WIN ? [bold ? 'arialbd.ttf' : 'arial.ttf', bold ? 'segoeuib.ttf' : 'segoeui.ttf'].map(f => path.join(process.env.WINDIR || 'C:\\Windows', 'Fonts', f))
+    : [bold ? '/System/Library/Fonts/Supplemental/Arial Bold.ttf' : '/System/Library/Fonts/Supplemental/Arial.ttf', `/usr/share/fonts/truetype/dejavu/DejaVuSans${bold ? '-Bold' : ''}.ttf`, `/usr/share/fonts/TTF/DejaVuSans${bold ? '-Bold' : ''}.ttf`];
+  const f = list.find(x => fs.existsSync(x)); if (!f) throw new Error('No font was found for text on the video.');
+  return f;
+}
+// Reads a timeline description, checks it, and works out the FFmpeg command. Files FFmpeg needs by name inside the filter
+// graph (fonts, title text, subtitles) are copied into `work`, where FFmpeg runs, so no path ever needs escaping.
+async function planVideo(spec, work, signal) {
+  if (!spec.output) throw new Error('Give an "output" file name, for example edited.mp4.');
+  const output = abs(String(spec.output)), ext = path.extname(output).toLowerCase();
+  const soundOnly = SOUND_FILE.test(output), gif = ext === '.gif';
+  if (!soundOnly && !gif && !/\.(mp4|mov|mkv|webm|m4v)$/i.test(ext)) throw new Error('The output must end in .mp4, .mov, .mkv, .webm, .gif, or a sound format such as .mp3 or .wav.');
+  for (const key of ['clips', 'overlays', 'texts', 'audio']) { const v = spec[key]; if (v === undefined || v === null || v === '') { delete spec[key]; continue; } if (!Array.isArray(v)) { if (typeof v !== 'object') throw new Error(`"${key}" must be a list.`); spec[key] = [v]; } if (spec[key].some(x => !x || typeof x !== 'object')) throw new Error(`Every entry in "${key}" must be an object such as {"file": "..."}.`); }
+  const clips = spec.clips;
+  if (!Array.isArray(clips) || !clips.length) throw new Error('The timeline needs "clips": a list with at least one {file}.');
+  if (clips.length > 200) throw new Error('Too many clips (the limit is 200).');
+  const quality = String(spec.quality || 'normal').toLowerCase();
+  if (!['draft', 'normal', 'high'].includes(quality)) throw new Error('quality must be draft, normal or high.');
+  const probes = new Map(), used = new Set(), notes = [];
+  const media = async (file, what) => {
+    if (!file) throw new Error(`${what} needs a "file".`);
+    const full = abs(String(file));
+    if (!probes.has(full)) probes.set(full, await probeMedia(full, signal));
+    used.add(full); return probes.get(full);
+  };
+  // ── clips → segments (a clip becomes several when pauses are cut out or a frame is frozen inside it) ──
+  const segments = [];
+  for (let ci = 0; ci < clips.length; ci++) {
+    const c = clips[ci] || {}, what = `Clip ${ci + 1}`, m = await media(c.file, what), len = m.duration;
+    if (!m.hasVideo && !soundOnly) throw new Error(`${what} (${path.basename(m.file)}) has no picture. Put sound files in "audio".`);
+    if (soundOnly && !m.hasAudio && !m.still) notes.push(`${what} has no sound`);
+    const speed = num(c.speed, `${what} speed`, 0.1, 100, 1);
+    let start = videoTime(c.start ?? c.in ?? c.from, `${what} start`, len) ?? 0;
+    const dur = videoTime(c.duration, `${what} duration`);
+    let end = videoTime(c.end ?? c.out ?? c.to, `${what} end`, len);
+    if (m.still) { start = 0; end = dur ?? end ?? 4; }
+    else {
+      if (end === undefined) end = dur !== undefined ? start + dur : len;
+      if (end > len + 0.05) notes.push(`${what}: it is only ${clock(len)} long, so it ends there`);
+      end = Math.min(end, len);
+    }
+    if (!(end - start >= 0.04)) throw new Error(`${what}: nothing is left between start ${clock(start)} and end ${clock(end)}${len ? ` (the file is ${clock(len)} long)` : ''}.`);
+    let ranges = [[start, end]];
+    if (c.remove_silence && m.hasAudio && !m.still) {
+      const quiet = await findSilences(m.file, { signal, from: start, to: end, noise: num(c.silence_db, `${what} silence_db`, -90, -5, -35), min: num(c.silence_min, `${what} silence_min`, 0.1, 30, 0.6) });
+      const keep = []; let at = start;
+      for (const q of quiet) { const stop = Math.min(end, q.start + 0.12); if (stop - at > 0.2) keep.push([at, stop]); at = Math.max(at, q.end - 0.12); }
+      if (end - at > 0.2) keep.push([at, end]);
+      if (!keep.length) throw new Error(`${what}: it is silent from start to end, so removing silence would leave nothing.`);
+      notes.push(`${what}: cut ${quiet.length} pause(s), ${clock(end - start - keep.reduce((a, r) => a + r[1] - r[0], 0))} removed`);
+      ranges = keep;
+    }
+    const list = ranges.map(([s, e]) => ({ c, m, what, s, e, speed, holdStart: 0, holdEnd: 0 }));
+    const freezes = (Array.isArray(c.freeze) ? c.freeze : []).concat(c.freeze_at !== undefined && c.freeze_at !== '' ? [{ at: c.freeze_at, duration: c.freeze_for }] : []);
+    for (const fz of freezes) {
+      const at = videoTime(fz.at, `${what} freeze_at`, len), hold = num(fz.duration, `${what} freeze_for`, 0.1, 60, 2);
+      const i = list.findIndex(g => at >= g.s - 0.001 && at <= g.e + 0.001);
+      if (i < 0) throw new Error(`${what}: the freeze at ${clock(at ?? 0)} is outside the part of the clip you kept.`);
+      const g = list[i];
+      if (at - g.s < 0.08) g.holdStart += hold;
+      else if (g.e - at < 0.08) g.holdEnd += hold;
+      else list.splice(i, 1, { ...g, e: at, holdEnd: hold }, { ...g, s: at, holdStart: 0 });
+    }
+    if (c.reverse) { if (end - start > 120) throw new Error(`${what}: reversing holds the whole section in memory, so keep it to 2 minutes or less.`); list.reverse(); for (const g of list) [g.holdStart, g.holdEnd] = [g.holdEnd, g.holdStart]; }
+    list[0].first = true; list[0].fadeIn = num(c.fade_in, `${what} fade_in`, 0, 60, 0); list[list.length - 1].fadeOut = num(c.fade_out, `${what} fade_out`, 0, 60, 0);
+    if (c.transition && c.transition !== 'none' && c.transition !== 'cut') {
+      const t = String(c.transition).toLowerCase().replace(/[^a-z]/g, '');
+      if (!TRANSITIONS.includes(t)) throw new Error(`${what}: unknown transition "${c.transition}". Choose from: ${TRANSITIONS.join(', ')}.`);
+      if (ci === 0) notes.push('a transition on the first clip does nothing (it is the change INTO a clip)');
+      else list[0].transition = { name: t, d: num(c.transition_duration, `${what} transition_duration`, 0.1, 10, 1) };
+    }
+    segments.push(...list);
+    if (segments.length > 300) throw new Error('That makes more than 300 pieces. Raise silence_min, or edit a shorter part.');
+  }
+  for (const g of segments) g.d = (g.m.still ? g.e : (g.e - g.s) / g.speed) + g.holdStart + g.holdEnd;
+  // ── canvas ──
+  const first = segments.find(g => g.m.hasVideo)?.m;
+  const aspects = { '16:9': [1920, 1080], landscape: [1920, 1080], '9:16': [1080, 1920], vertical: [1080, 1920], portrait: [1080, 1920], '1:1': [1080, 1080], square: [1080, 1080], '4:5': [1080, 1350], '4:3': [1440, 1080] };
+  const shape = spec.aspect ? aspects[String(spec.aspect).toLowerCase()] : null;
+  if (spec.aspect && !shape) throw new Error(`aspect must be one of ${Object.keys(aspects).join(', ')}.`);
+  let W = num(spec.width, 'width', 16, 7680, undefined), H = num(spec.height, 'height', 16, 4320, undefined);
+  // without a size or shape, the result is the size of the first clip as it looks after its crop and rotation
+  const lead = segments.find(g => g.m.hasVideo);
+  let own = first ? [first.width, first.height] : [1280, 720];
+  if (lead?.c.crop) { const k = typeof lead.c.crop === 'string' ? lead.c.crop.split(/[:,x ]+/).map(Number) : [lead.c.crop.width, lead.c.crop.height].map(Number); if (k[0] > 0 && k[1] > 0) own = [Math.min(k[0], own[0]), Math.min(k[1], own[1])]; }
+  if (lead && Math.abs(Number(lead.c.rotate) || 0) % 180 === 90) own = [own[1], own[0]];
+  const base = shape || own;
+  if (W && !H) H = W * base[1] / base[0]; else if (H && !W) W = H * base[0] / base[1]; else if (!W) [W, H] = base;
+  let F = num(spec.fps, 'fps', 1, 240, undefined) ?? Math.min(60, Math.round(first?.fps || 30)) ?? 30;
+  if (quality === 'draft' && Math.max(W, H) > 854) { const k = 854 / Math.max(W, H); W *= k; H *= k; F = Math.min(F, 30); }
+  if (gif) { if (Math.max(W, H) > 640) { const k = 640 / Math.max(W, H); W *= k; H *= k; } F = Math.min(F, 15); }
+  W = even(W); H = even(H); F = F || 30;
+
+  const inputs = [], graph = [];
+  const input = (...args) => { inputs.push(args); return inputs.length - 1; };
+  const source = (m, s, d) => m.still ? input('-loop', '1', '-framerate', String(F), '-t', f3(d), '-i', m.file) : input('-ss', f3(s), '-t', f3(d), '-i', m.file);
+  let label = 0; const L = p => p + (label++);
+  // ── each segment ──
+  for (const g of segments) {
+    const { c, m, d } = g, n = source(m, g.s, g.m.still ? d : g.e - g.s);
+    if (!soundOnly) {
+      const pre = ['setpts=PTS-STARTPTS'], look = [];
+      if (c.stabilize) pre.push('deshake');
+      if (c.reverse && !m.still) pre.push('reverse', 'setpts=PTS-STARTPTS');
+      if (g.speed !== 1 && !m.still) pre.push(`setpts=PTS/${f3(g.speed)}`);
+      if (c.smooth && g.speed < 1) pre.push(`minterpolate=fps=${F}:mi_mode=blend`);
+      const turn = num(c.rotate, `${g.what} rotate`, -360, 360, 0); const q = ((turn % 360) + 360) % 360;
+      if (q === 90) pre.push('transpose=1'); else if (q === 180) pre.push('hflip', 'vflip'); else if (q === 270) pre.push('transpose=2'); else if (q) pre.push(`rotate=${f3(q * Math.PI / 180)}:fillcolor=black`);
+      if (c.crop) { const k = typeof c.crop === 'string' ? c.crop.split(/[:,x ]+/).map(Number) : [c.crop.width, c.crop.height, c.crop.x, c.crop.y].map(Number); if (!(k[0] > 0 && k[1] > 0)) throw new Error(`${g.what}: crop needs width and height (and optionally x, y).`); pre.push(`crop=${Math.round(k[0])}:${Math.round(k[1])}` + (Number.isFinite(k[2]) && Number.isFinite(k[3]) ? `:${Math.round(k[2])}:${Math.round(k[3])}` : '')); }
+      const eq = [];
+      for (const [key, lo, hi] of [['brightness', -1, 1], ['contrast', 0, 3], ['saturation', 0, 3], ['gamma', 0.1, 10]]) { const v = num(c[key], `${g.what} ${key}`, lo, hi, undefined); if (v !== undefined) eq.push(`${key}=${f3(v)}`); }
+      if (c.auto_color) look.push('normalize=smoothing=30:independence=0.5');
+      if (eq.length) look.push('eq=' + eq.join(':'));
+      const kelvin = num(c.temperature, `${g.what} temperature`, 1000, 40000, undefined); if (kelvin !== undefined) look.push(`colortemperature=temperature=${Math.round(kelvin)}`);
+      if (c.lut) { const from = abs(String(c.lut)); if (!fs.existsSync(from)) throw new Error(`${g.what}: LUT file not found: ${from}`); const name = L('lut') + (path.extname(from) || '.cube'); fs.copyFileSync(from, path.join(work, name)); look.push('lut3d=' + name); }
+      for (const f of [].concat(c.filter || c.filters || []).flatMap(x => String(x).split(/[,+]/)).map(x => x.trim().toLowerCase().replace(/[\s_-]/g, '')).filter(x => x && x !== 'none')) { if (!VIDEO_FILTERS[f]) throw new Error(`${g.what}: unknown filter "${f}". Choose from: ${Object.keys(VIDEO_FILTERS).join(', ')}.`); look.push(VIDEO_FILTERS[f]); }
+      const fit = String(c.fit || 'contain').toLowerCase();
+      if (!['contain', 'cover', 'stretch'].includes(fit)) throw new Error(`${g.what}: fit must be contain, cover or stretch.`);
+      const size = fit === 'cover' ? [`scale=${W}:${H}:force_original_aspect_ratio=increase`, `crop=${W}:${H}`] : fit === 'stretch' ? [`scale=${W}:${H}`] : [`scale=${W}:${H}:force_original_aspect_ratio=decrease`, `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black`];
+      const fades = []; if (g.fadeIn) fades.push(`fade=t=in:st=0:d=${f3(Math.min(g.fadeIn, d))}`); if (g.fadeOut) fades.push(`fade=t=out:st=${f3(Math.max(0, d - g.fadeOut))}:d=${f3(Math.min(g.fadeOut, d))}`);
+      const after = [`fps=${F}`, `tpad=start_mode=clone:start_duration=${f3(g.holdStart)}:stop_mode=clone:stop_duration=${f3(g.holdEnd + 1)}`, `trim=duration=${f3(d)}`, 'setpts=PTS-STARTPTS', ...fades, 'format=yuv420p', 'settb=AVTB'];
+      g.v = L('v');
+      const bg = c.background || c.green_screen_background;
+      if (bg) { // green screen: remove the key colour and put another picture or video behind
+        const b = await media(bg, `${g.what} background`), bn = b.still ? input('-loop', '1', '-framerate', String(F), '-t', f3(d + 1), '-i', b.file) : input('-stream_loop', '-1', '-t', f3(d + 1), '-i', b.file);
+        const bl = L('bg'), fl = L('fg'), color = keyColor(c.key_color);
+        graph.push(`[${bn}:v]setpts=PTS-STARTPTS,scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${F}[${bl}]`);
+        graph.push(`[${n}:v]${[...pre, `chromakey=${color}:${f3(num(c.key_similarity, `${g.what} key_similarity`, 0.01, 1, 0.18))}:${f3(num(c.key_blend, `${g.what} key_blend`, 0, 1, 0.08))}`, ...(color === '0x00FF00' ? ['despill=type=green'] : color === '0x0000FF' ? ['despill=type=blue'] : []), ...look, `scale=${W}:${H}:force_original_aspect_ratio=decrease`, 'setsar=1', `fps=${F}`].join(',')}[${fl}]`);
+        graph.push(`[${bl}][${fl}]overlay=(W-w)/2:(H-h)/2:eof_action=repeat,${after.join(',')}[${g.v}]`);
+      } else graph.push(`[${n}:v]${[...pre, ...look, ...size, 'setsar=1', ...after].join(',')}[${g.v}]`);
+    }
+    if (!gif) {
+      g.a = L('a');
+      const vol = num(c.volume, `${g.what} volume`, 0, 10, 1);
+      const chain = [];
+      if (m.hasAudio && !c.mute && vol > 0 && !m.still) {
+        chain.push('asetpts=PTS-STARTPTS');
+        if (c.reverse) chain.push('areverse', 'asetpts=PTS-STARTPTS');
+        chain.push(...tempoChain(g.speed));
+        if (c.denoise || c.remove_noise) chain.push('highpass=f=70', DENOISE);
+        if (c.level) chain.push('dynaudnorm=f=200:g=15'); // evens out quiet and loud speech
+        if (vol !== 1) chain.push('volume=' + f3(vol));
+        chain.push(...toStereo(m));
+        if (g.holdStart) chain.push(`adelay=${Math.round(g.holdStart * 1000)}:all=1`);
+        chain.push(`apad=whole_dur=${f3(d)}`, `atrim=duration=${f3(d)}`, 'asetpts=PTS-STARTPTS');
+      }
+      if (g.fadeIn) chain.push(`afade=t=in:st=0:d=${f3(Math.min(g.fadeIn, d))}`);
+      if (g.fadeOut) chain.push(`afade=t=out:st=${f3(Math.max(0, d - g.fadeOut))}:d=${f3(Math.min(g.fadeOut, d))}`);
+      graph.push(chain[0] === 'asetpts=PTS-STARTPTS' ? `[${n}:a]${chain.join(',')}[${g.a}]` : `anullsrc=r=48000:cl=stereo,${[`atrim=duration=${f3(d)}`, ...chain, 'aformat=sample_fmts=fltp:channel_layouts=stereo'].join(',')}[${g.a}]`);
+    }
+  }
+  // ── join: straight cuts are concatenated, transitions cross-fade ──
+  const groups = [];
+  for (const g of segments) { if (!groups.length || g.transition) groups.push({ list: [g], transition: g.transition }); else groups[groups.length - 1].list.push(g); }
+  for (const gr of groups) {
+    gr.d = gr.list.reduce((a, g) => a + g.d, 0);
+    if (gr.list.length === 1) { gr.v = gr.list[0].v; gr.a = gr.list[0].a; continue; }
+    if (!soundOnly) { gr.v = L('jv'); graph.push(`${gr.list.map(g => `[${g.v}]`).join('')}concat=n=${gr.list.length}:v=1:a=0,fps=${F},settb=AVTB[${gr.v}]`); }
+    if (!gif) { gr.a = L('ja'); graph.push(`${gr.list.map(g => `[${g.a}]`).join('')}concat=n=${gr.list.length}:v=0:a=1[${gr.a}]`); }
+  }
+  let v = groups[0].v, a = groups[0].a, total = groups[0].d;
+  for (let i = 1; i < groups.length; i++) {
+    const gr = groups[i], before = groups[i - 1].list.at(-1).d, td = Math.max(0.05, Math.min(gr.transition.d, before * 0.9, gr.list[0].d * 0.9));
+    if (!soundOnly) { const nv = L('x'); graph.push(`[${v}][${gr.v}]xfade=transition=${gr.transition.name}:duration=${f3(td)}:offset=${f3(Math.max(0, total - td))},fps=${F},settb=AVTB[${nv}]`); v = nv; }
+    if (!gif) { const na = L('xa'); graph.push(`[${a}][${gr.a}]acrossfade=d=${f3(td)}[${na}]`); a = na; }
+    total += gr.d - td;
+  }
+  // ── overlays (pictures, logos, picture-in-picture, keyed video) ──
+  if (!soundOnly) for (const [i, o] of (spec.overlays || []).entries()) {
+    const what = `Overlay ${i + 1}`, m = await media(o.file, what);
+    if (!m.hasVideo) throw new Error(`${what} has no picture. Put sound files in "audio".`);
+    const at = videoTime(o.at ?? o.start_time, `${what} at`, total) ?? 0;
+    if (at >= total) throw new Error(`${what} starts at ${clock(at)}, after the video ends (${clock(total)}).`);
+    const from = videoTime(o.start, `${what} start`, m.duration) ?? 0;
+    const d = Math.min(videoTime(o.duration, `${what} duration`) ?? (m.still ? total - at : m.duration - from), total - at);
+    const n = source(m, from, d), chain = ['setpts=PTS-STARTPTS'];
+    if (o.key_color || o.green_screen) chain.push(`chromakey=${keyColor(o.key_color)}:${f3(num(o.key_similarity, `${what} key_similarity`, 0.01, 1, 0.18))}:0.08`);
+    const wide = num(o.width, `${what} width`, 1, 8000, undefined), tall = num(o.height, `${what} height`, 1, 8000, undefined), scale = num(o.scale, `${what} scale`, 0.01, 4, undefined);
+    if (wide || tall) chain.push(`scale=${wide ? Math.round(wide) : -1}:${tall ? Math.round(tall) : -1}`); else chain.push(`scale=${even(W * (scale ?? (o.key_color || o.green_screen ? 1 : 0.25)))}:-1`);
+    chain.push('format=rgba');
+    const op = num(o.opacity, `${what} opacity`, 0, 1, 1); if (op < 1) chain.push(`colorchannelmixer=aa=${f3(op)}`);
+    const fi = num(o.fade_in, `${what} fade_in`, 0, 60, 0), fo = num(o.fade_out, `${what} fade_out`, 0, 60, 0);
+    if (fi) chain.push(`fade=t=in:st=0:d=${f3(fi)}:alpha=1`); if (fo) chain.push(`fade=t=out:st=${f3(Math.max(0, d - fo))}:d=${f3(fo)}:alpha=1`);
+    chain.push(`setpts=PTS+${f3(at)}/TB`);
+    const spot = String(o.position || (o.key_color || o.green_screen ? 'center' : 'top-right')).toLowerCase().replace(/[ _]/g, '-');
+    if (o.x === undefined && o.y === undefined && !SPOTS.includes(spot)) throw new Error(`${what}: position must be one of ${SPOTS.join(', ')} (or give x and y).`);
+    const mx = Math.round(W * 0.02), x = o.x !== undefined ? Math.round(num(o.x, `${what} x`, -8000, 8000, 0)) : /left/.test(spot) ? mx : /right/.test(spot) ? `W-w-${mx}` : '(W-w)/2';
+    const y = o.y !== undefined ? Math.round(num(o.y, `${what} y`, -8000, 8000, 0)) : /top/.test(spot) ? mx : /bottom/.test(spot) ? `H-h-${mx}` : '(H-h)/2';
+    const ol = L('ov'), nv = L('o');
+    graph.push(`[${n}:v]${chain.join(',')}[${ol}]`, `[${v}][${ol}]overlay=x=${x}:y=${y}:eof_action=pass:enable='between(t,${f3(at)},${f3(at + d)})'[${nv}]`); v = nv;
+  }
+  // ── titles and subtitles ──
+  if (!soundOnly) {
+    const draw = [];
+    for (const [i, t] of (spec.texts || []).entries()) {
+      const what = `Text ${i + 1}`; if (!String(t.text ?? '').trim()) throw new Error(`${what} needs "text".`);
+      const at = videoTime(t.at ?? t.start, `${what} at`, total) ?? 0, d = videoTime(t.duration, `${what} duration`) ?? total - at;
+      const name = L('title') + '.txt', font = L('font') + '.ttf'; fs.writeFileSync(path.join(work, name), String(t.text)); fs.copyFileSync(findFont(t.bold !== false), path.join(work, font));
+      const spot = String(t.position || 'bottom').toLowerCase().replace(/[ _]/g, '-');
+      if (!SPOTS.includes(spot)) throw new Error(`${what}: position must be one of ${SPOTS.join(', ')}.`);
+      const size = Math.round(num(t.size, `${what} size`, 6, 600, Math.max(14, Math.round(H / 15)))), mg = Math.round(H * 0.06);
+      const x = /left/.test(spot) ? mg : /right/.test(spot) ? `w-tw-${mg}` : '(w-tw)/2', y = /top/.test(spot) ? mg : /bottom/.test(spot) ? `h-th-${mg}` : '(h-th)/2';
+      const fade = num(t.fade, `${what} fade`, 0, 10, 0);
+      draw.push(`drawtext=fontfile=${font}:textfile=${name}:expansion=none:fontsize=${size}:fontcolor=${textColor(t.color)}:x=${x}:y=${y}:shadowcolor=black@0.6:shadowx=2:shadowy=2${t.box ? `:box=1:boxcolor=black@0.55:boxborderw=${Math.round(size / 4)}` : ''}${fade ? `:alpha='clip(min((t-${f3(at)})/${f3(fade)},(${f3(at + d)}-t)/${f3(fade)}),0,1)'` : ''}:enable='between(t,${f3(at)},${f3(at + d)})'`);
+    }
+    if (spec.subtitles) { const from = abs(String(spec.subtitles)); if (!fs.existsSync(from)) throw new Error('Subtitle file not found: ' + from); const e = path.extname(from).toLowerCase(); if (!['.srt', '.ass', '.vtt', '.ssa'].includes(e)) throw new Error('Subtitles must be .srt, .vtt or .ass.'); used.add(from); fs.copyFileSync(from, path.join(work, 'subs' + e)); draw.push('subtitles=subs' + e); }
+    const fi = num(spec.fade_in, 'fade_in', 0, 60, 0), fo = num(spec.fade_out, 'fade_out', 0, 60, 0);
+    if (fi) draw.push(`fade=t=in:st=0:d=${f3(fi)}`); if (fo) draw.push(`fade=t=out:st=${f3(Math.max(0, total - fo))}:d=${f3(fo)}`);
+    if (draw.length) { const nv = L('t'); graph.push(`[${v}]${draw.join(',')}[${nv}]`); v = nv; }
+  }
+  // ── sound tracks: music and effects mixed under the clips ──
+  if (!gif) {
+    const tracks = [];
+    for (const [i, t] of (spec.audio || []).entries()) {
+      const what = `Audio ${i + 1}`, m = await media(t.file, what);
+      if (!m.hasAudio) throw new Error(`${what} (${path.basename(m.file)}) has no sound.`);
+      const at = videoTime(t.at, `${what} at`, total) ?? 0;
+      if (at >= total) throw new Error(`${what} starts at ${clock(at)}, after the video ends (${clock(total)}).`);
+      const from = videoTime(t.start, `${what} start`, m.duration) ?? 0, to = videoTime(t.end, `${what} end`, m.duration);
+      let d = videoTime(t.duration, `${what} duration`) ?? (to !== undefined ? to - from : t.loop ? total - at : m.duration - from);
+      d = Math.min(d, total - at, t.loop ? Infinity : m.duration - from);
+      if (!(d > 0.02)) throw new Error(`${what}: there is no sound left in that range.`);
+      const n = input(...(t.loop ? ['-stream_loop', '-1'] : []), '-ss', f3(from), '-t', f3(d), '-i', m.file);
+      const chain = ['asetpts=PTS-STARTPTS'];
+      if (t.denoise) chain.push('highpass=f=70', DENOISE);
+      chain.push('volume=' + f3(num(t.volume, `${what} volume`, 0, 10, 1)));
+      const fi = num(t.fade_in, `${what} fade_in`, 0, 60, 0), fo = num(t.fade_out, `${what} fade_out`, 0, 60, 0);
+      if (fi) chain.push(`afade=t=in:st=0:d=${f3(Math.min(fi, d))}`); if (fo) chain.push(`afade=t=out:st=${f3(Math.max(0, d - fo))}:d=${f3(Math.min(fo, d))}`);
+      chain.push(...toStereo(m)); if (at) chain.push(`adelay=${Math.round(at * 1000)}:all=1`);
+      const l = L('m'); graph.push(`[${n}:a]${chain.join(',')}[${l}]`); tracks.push({ l, duck: !!t.duck });
+    }
+    if (tracks.length) {
+      const ducked = tracks.filter(t => t.duck);
+      let main = a;
+      if (ducked.length) { // "duck": the music drops while the clips have speech
+        main = L('main'); const keys = ducked.map(() => L('key'));
+        graph.push(`[${a}]asplit=${keys.length + 1}[${main}]${keys.map(k => `[${k}]`).join('')}`);
+        ducked.forEach((t, i) => { const nl = L('dk'); graph.push(`[${t.l}][${keys[i]}]sidechaincompress=threshold=0.02:ratio=10:attack=20:release=400[${nl}]`); t.l = nl; });
+      }
+      const na = L('mix'); graph.push(`[${main}]${tracks.map(t => `[${t.l}]`).join('')}amix=inputs=${tracks.length + 1}:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95:level=false[${na}]`); a = na;
+    }
+    const end = [];
+    if (spec.normalize) end.push('loudnorm=I=-16:TP=-1.5:LRA=11', 'aresample=48000');
+    const fi = num(spec.fade_in, 'fade_in', 0, 60, 0), fo = num(spec.fade_out, 'fade_out', 0, 60, 0);
+    if (fi) end.push(`afade=t=in:st=0:d=${f3(fi)}`); if (fo) end.push(`afade=t=out:st=${f3(Math.max(0, total - fo))}:d=${f3(fo)}`);
+    if (end.length) { const na = L('end'); graph.push(`[${a}]${end.join(',')}[${na}]`); a = na; }
+  }
+  if (gif) { const g1 = L('g'), g2 = L('g'), p = L('pal'), nv = L('gif'); graph.push(`[${v}]split[${g1}][${g2}]`, `[${g1}]palettegen=stats_mode=diff[${p}]`, `[${g2}][${p}]paletteuse=dither=bayer[${nv}]`); v = nv; }
+  const same = x => IS_WIN ? x.toLowerCase() : x;
+  if ([...used].some(x => same(x) === same(output))) throw new Error('The output must be a new file: it cannot be one of the files you are editing from.');
+  const x264 = { draft: ['-preset', 'veryfast', '-crf', '28'], normal: ['-preset', 'medium', '-crf', '20'], high: ['-preset', 'slow', '-crf', '17'] }[quality];
+  const enc = soundOnly ? ({ '.mp3': ['-c:a', 'libmp3lame', '-q:a', '2'], '.wav': ['-c:a', 'pcm_s16le'], '.flac': ['-c:a', 'flac'], '.opus': ['-c:a', 'libopus', '-b:a', '160k'], '.ogg': ['-c:a', 'libvorbis', '-q:a', '5'] }[ext] || ['-c:a', 'aac', '-b:a', '192k'])
+    : gif ? ['-loop', '0'] : ext === '.webm' ? ['-c:v', 'libvpx-vp9', '-b:v', '0', '-crf', quality === 'high' ? '28' : quality === 'draft' ? '40' : '32', '-row-mt', '1', '-c:a', 'libopus', '-b:a', '160k']
+      : ['-c:v', 'libx264', ...x264, '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart'];
+  const maps = [...(soundOnly ? [] : ['-map', `[${v}]`]), ...(gif ? [] : ['-map', `[${a}]`])];
+  return { output, inputs, graph: graph.join(';'), maps, enc, total, W, H, F, soundOnly, gif, notes, segments };
+}
+const videoSummary = spec => {
+  const L = [];
+  (Array.isArray(spec.clips) ? spec.clips : []).forEach((c, i) => L.push(`${i + 1}. ${path.basename(String(c.file || '?'))}${c.start !== undefined || c.end !== undefined ? ` ${c.start ?? 0} → ${c.end ?? 'end'}` : ''}${[c.speed && c.speed !== 1 ? `×${c.speed}` : '', c.reverse ? 'reversed' : '', c.freeze_at !== undefined || c.freeze ? 'freeze frame' : '', c.remove_silence ? 'pauses cut' : '', c.mute ? 'muted' : '', c.denoise ? 'noise removed' : '', c.background ? 'green screen' : '', c.filter ? `filter ${c.filter}` : '', c.transition ? `${c.transition} in` : ''].filter(Boolean).map(x => ' · ' + x).join('')}`));
+  for (const [key, name] of [['overlays', 'overlay'], ['texts', 'title'], ['audio', 'sound']]) if (spec[key]?.length) L.push(`+ ${spec[key].length} ${name}${spec[key].length > 1 ? 's' : ''}`);
+  return L.join('\n');
+};
+// Renders a timeline. The file appears only when the render succeeds, and an existing output is replaced only then.
+async function renderVideo(args, { signal, progress } = {}) {
+  let spec = { ...args };
+  if (args.project) {
+    const p = abs(String(args.project)); let saved;
+    try { saved = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { throw new Error(`Could not read the timeline ${p}: ${e.message}`); }
+    const changes = Object.fromEntries(Object.entries(args).filter(([k, v]) => v !== undefined && k !== 'project' && k !== 'file_path'));
+    spec = { ...saved, ...changes };
+  }
+  delete spec.project; delete spec.file_path;
+  const tools = ffTools(), work = fs.mkdtempSync(path.join(os.tmpdir(), 'panda-video-'));
+  let part = '';
+  try {
+    const plan = await planVideo(spec, work, signal);
+    fs.mkdirSync(path.dirname(plan.output), { recursive: true });
+    const ext = path.extname(plan.output); part = plan.output.slice(0, -ext.length) + `.panda-render-${process.pid}${ext}`;
+    let graph = ['-filter_complex', plan.graph];
+    if (plan.graph.length > 12000) { fs.writeFileSync(path.join(work, 'graph.txt'), plan.graph); graph = ['-/filter_complex', 'graph.txt']; }
+    const argv = ['-hide_banner', '-v', 'error', '-nostdin', '-y', '-progress', 'pipe:1', '-nostats', ...plan.inputs.flat(), ...graph, ...plan.maps, ...plan.enc, '-t', f3(plan.total), part];
+    let shown = -1;
+    const r = await runProgram(tools.ffmpeg, argv, { signal, cwd: work, keepOut: false, onOut: d => { const m = [...d.matchAll(/out_time_us=(\d+)/g)].pop(); if (m && progress) { const pct = Math.min(99, Math.floor(+m[1] / 1e4 / plan.total)); if (pct !== shown) { shown = pct; progress(pct); } } } });
+    if (r.code !== 0 || !fs.existsSync(part) || !fs.statSync(part).size) throw new Error('FFmpeg could not render this timeline: ' + (r.err.trim().split('\n').slice(-4).join(' | ') || 'exit code ' + r.code));
+    fs.rmSync(plan.output, { force: true }); fs.renameSync(part, plan.output);
+    const made = await probeMedia(plan.output, signal);
+    // the saved timeline: change it and render again for the next edit
+    const timeline = plan.output.slice(0, -ext.length) + '.timeline.json';
+    const full = f => f ? abs(String(f)) : f;
+    const saved = { ...spec, output: plan.output, clips: spec.clips.map(c => ({ ...c, file: full(c.file), ...(c.background ? { background: full(c.background) } : {}), ...(c.lut ? { lut: full(c.lut) } : {}) })), ...(spec.overlays ? { overlays: spec.overlays.map(o => ({ ...o, file: full(o.file) })) } : {}), ...(spec.audio ? { audio: spec.audio.map(o => ({ ...o, file: full(o.file) })) } : {}), ...(spec.subtitles ? { subtitles: full(spec.subtitles) } : {}) };
+    try { fs.writeFileSync(timeline, JSON.stringify(saved, null, 2)); } catch { }
+    return { ...plan, made, timeline, spec: saved };
+  } finally {
+    if (part) { try { fs.rmSync(part, { force: true }); } catch { } }
+    try { fs.rmSync(work, { recursive: true, force: true }); } catch { }
+  }
+}
+// still frames from a video, so a vision model can see what is in it
+async function videoFrames(file, times, signal) {
+  const m = await probeMedia(file, signal);
+  if (!m.hasVideo) throw new Error('That file has no picture.');
+  const at = m.still ? [0] : times, images = [], work = fs.mkdtempSync(path.join(os.tmpdir(), 'panda-frames-'));
+  try {
+    for (const [i, t] of at.entries()) {
+      const f = path.join(work, `f${i}.jpg`);
+      await runProgram(ffTools().ffmpeg, ['-hide_banner', '-v', 'error', '-nostdin', '-y', ...(t ? ['-ss', f3(t)] : []), '-i', file, '-frames:v', '1', '-vf', "scale='min(640,iw)':-2", '-q:v', '4', f], { signal });
+      if (fs.existsSync(f)) { const data = fs.readFileSync(f); images.push({ name: `frame at ${clock(t)}.jpg`, mime: 'image/jpeg', data: data.toString('base64'), bytes: data.length, at: t }); }
+    }
+  } finally { fs.rmSync(work, { recursive: true, force: true }); }
+  if (!images.length) throw new Error('No frame could be read at those times.');
+  return { media: m, images };
+}
+TOOLS.VideoInfo = {
+  perm: null,
+  description: 'Gives the length, size, frame rate and sound of a video, audio or picture file. Call it before editing a file. analyze "silence" also lists the quiet pauses; "scenes" lists where the shot changes.',
+  schema: { type: 'object', properties: { file: P('string', 'Path of the media file'), analyze: P('string', 'Optional: "silence" or "scenes"') }, required: ['file'] },
+  label: a => rel(abs(a.file)) + (a.analyze ? ' · ' + a.analyze : ''),
+  async run(a, ctx) {
+    const m = await probeMedia(abs(a.file), ctx.signal);
+    let text = `${m.file}\n${mediaLine(m)}\nduration_seconds: ${m.duration !== undefined ? f3(m.duration) : 'none (picture)'}`;
+    const what = String(a.analyze || '').toLowerCase();
+    if (what.startsWith('silen')) { if (!m.hasAudio) text += '\nIt has no sound.'; else { const q = await findSilences(m.file, { signal: ctx.signal, to: m.duration }); text += q.length ? `\nQuiet pauses (seconds): ${q.map(x => `${x.start.toFixed(2)}-${x.end.toFixed(2)}`).join(', ')}` : '\nNo quiet pauses found.'; } }
+    else if (what.startsWith('scene')) { const s = await findScenes(m.file, ctx.signal); text += s.length ? `\nShot changes at (seconds): ${s.map(x => x.toFixed(2)).join(', ')}` : '\nNo clear shot changes found.'; }
+    return { content: text, display: mediaLine(m) };
+  },
+};
+TOOLS.VideoFrames = {
+  perm: null,
+  description: 'Shows you still frames from a video so you can see what is in it (for example to find the moment to cut, or to check a render). Give times, or a count of evenly spaced frames (default 4, at most 8). The pictures arrive in the next message if you can see images.',
+  schema: { type: 'object', properties: { file: P('string', 'Path of the video'), times: P('string', 'Times to look at, comma separated, e.g. "2, 15.5, 1:10"'), count: P('number', 'Number of evenly spaced frames') }, required: ['file'] },
+  label: a => rel(abs(a.file)),
+  async run(a, ctx) {
+    if (state.vision === false) throw new Error(`The current model (${state.model}) cannot see images, so it cannot look at frames. Use VideoInfo instead, or ask the user to pick a vision model with /model.`);
+    const file = abs(a.file), m = await probeMedia(file, ctx.signal), len = m.duration || 0;
+    let times = String(a.times || '').split(/[,;]/).map(x => x.trim()).filter(Boolean).map(x => videoTime(x, 'time', len));
+    if (!times.length) { const n = Math.max(1, Math.min(8, Math.round(a.count || 4))); times = Array.from({ length: n }, (_, i) => len * (i + 0.5) / n); }
+    times = times.slice(0, 8).map(t => Math.max(0, Math.min(t, Math.max(0, len - 0.1))));
+    const r = await videoFrames(file, times, ctx.signal);
+    return { content: `${r.images.length} frame(s) from ${path.basename(file)}, in order, taken at (seconds): ${r.images.map(i => i.at.toFixed(2)).join(', ')}. They are attached in the next message.`, images: r.images.map(({ at, ...i }) => i), display: `${r.images.length} frame(s) at ${r.images.map(i => clock(i.at)).join(', ')}` };
+  },
+};
+const vStr = d => P('string', d), vNum = d => P('number', d), vBool = d => P('boolean', d);
+TOOLS.VideoRender = {
+  perm: 'edit',
+  description: `Edits video like a timeline editor and renders a new file. Source files are never changed. "clips" play one after another; "overlays", "texts" and "audio" are layered on top. All times are seconds or "m:ss"; a negative start/end counts back from the end. To cut something out of the middle, list the same file twice with different start/end. Output can be .mp4, .mov, .mkv, .webm, .gif or sound only (.mp3, .wav). The timeline is saved next to the output; pass it as "project" (plus the fields to change) to edit again.
+Filters: ${Object.keys(VIDEO_FILTERS).join(', ')}. Transitions: ${TRANSITIONS.join(', ')}. Positions: ${SPOTS.join(', ')}.
+Example: {"output":"final.mp4","clips":[{"file":"a.mp4","start":"0:05","end":"0:20","denoise":true},{"file":"b.mp4","speed":2,"transition":"fade"}],"texts":[{"text":"Intro","at":0,"duration":3}],"audio":[{"file":"music.mp3","volume":0.2,"loop":true,"duck":true,"fade_out":2}],"normalize":true}`,
+  schema: {
+    type: 'object', required: [], properties: {
+      output: vStr('File to create, e.g. edited.mp4'), project: vStr('A saved .timeline.json to render again; other fields given replace its fields'),
+      clips: { type: 'array', description: 'The main track, in order', items: { type: 'object', required: ['file'], properties: { file: vStr('Video or picture'), start: vStr('In point'), end: vStr('Out point'), duration: vStr('Length to keep (or how long a picture stays)'), speed: vNum('0.1 to 100; 2 is twice as fast, 0.5 is slow motion'), smooth: vBool('Smoother slow motion'), reverse: vBool('Play backwards'), freeze_at: vStr('Time in the source to freeze on'), freeze_for: vNum('Seconds the frame stays frozen (default 2)'), remove_silence: vBool('Cut out quiet pauses'), mute: vBool('No sound'), volume: vNum('1 is unchanged'), denoise: vBool('Reduce background noise'), level: vBool('Even out quiet and loud speech'), fade_in: vNum('Seconds'), fade_out: vNum('Seconds'), transition: vStr('Change INTO this clip'), transition_duration: vNum('Seconds (default 1)'), brightness: vNum('-1 to 1, 0 unchanged'), contrast: vNum('0 to 3, 1 unchanged'), saturation: vNum('0 to 3, 1 unchanged'), gamma: vNum('0.1 to 10, 1 unchanged'), temperature: vNum('Kelvin: below 6500 warmer, above cooler'), auto_color: vBool('Automatic colour correction'), filter: vStr('One or more filter names, comma separated'), lut: vStr('A .cube colour lookup file'), background: vStr('Green screen: picture or video to put behind this clip'), key_color: vStr('Colour to remove: green (default), blue or #RRGGBB'), key_similarity: vNum('0.01 to 1, default 0.18'), rotate: vNum('Degrees clockwise'), crop: vStr('"width:height" or "width:height:x:y" in source pixels'), fit: vStr('contain (default, bars), cover (fill and crop) or stretch'), stabilize: vBool('Reduce camera shake') } } },
+      overlays: { type: 'array', description: 'Pictures, logos or small videos on top', items: { type: 'object', required: ['file'], properties: { file: vStr('Picture or video'), at: vStr('When it appears'), duration: vStr('How long'), start: vStr('Start point inside an overlay video'), position: vStr('Where (default top-right)'), x: vNum('Pixels from the left'), y: vNum('Pixels from the top'), scale: vNum('Width as a share of the video width, default 0.25'), width: vNum('Pixels'), height: vNum('Pixels'), opacity: vNum('0 to 1'), key_color: vStr('Remove this colour (green screen)'), fade_in: vNum('Seconds'), fade_out: vNum('Seconds') } } },
+      texts: { type: 'array', description: 'Titles and captions', items: { type: 'object', required: ['text'], properties: { text: vStr('The words'), at: vStr('When'), duration: vStr('How long'), position: vStr('Where (default bottom)'), size: vNum('Font size in pixels'), color: vStr('Name or #RRGGBB'), box: vBool('Dark box behind the text'), fade: vNum('Fade seconds') } } },
+      audio: { type: 'array', description: 'Music, voice and sound effects mixed with the clips', items: { type: 'object', required: ['file'], properties: { file: vStr('Sound or video file'), at: vStr('When it starts in the result'), start: vStr('Start point inside the sound file'), duration: vStr('How long'), volume: vNum('1 is unchanged; music under speech is about 0.2'), fade_in: vNum('Seconds'), fade_out: vNum('Seconds'), loop: vBool('Repeat to the end'), duck: vBool('Lower it while the clips have sound'), denoise: vBool('Reduce noise') } } },
+      subtitles: vStr('A .srt file to burn into the picture'), normalize: vBool('Set the overall loudness to a standard level'), fade_in: vNum('Fade the whole video in'), fade_out: vNum('Fade the whole video out'),
+      aspect: vStr('16:9, 9:16 (vertical), 1:1, 4:5 or 4:3'), width: vNum('Pixels'), height: vNum('Pixels'), fps: vNum('Frames per second'), quality: vStr('draft (quick preview), normal or high'),
+    },
+  },
+  label: a => String(a.output || a.project || ''),
+  preview: a => videoSummary(a) || `re-render ${a.project}`,
+  async run(a, ctx) {
+    const r = await renderVideo(a, { signal: ctx.signal, progress: p => (ctx.depth === 0 ? SP() : NULLSP).set(`Rendering video ${p}%`) });
+    const line = `${rel(r.output)} · ${r.soundOnly ? clock(r.made.duration) : mediaLine(r.made)}`;
+    return { content: `Rendered ${r.output} (${mediaLine(r.made)}).${r.notes.length ? ' Notes: ' + r.notes.join('; ') + '.' : ''}\nTimeline saved to ${r.timeline} (to change the edit, call VideoRender with "project" set to it, plus the fields to replace).`, display: `Rendered ${C.bold(line)}\n${C.gray(videoSummary(r.spec))}${r.notes.length ? '\n' + C.yellow(r.notes.join('\n')) : ''}` };
+  },
+};
+async function videoSetup() {
+  if (findProgram('ffmpeg') && findProgram('ffprobe')) { out(C.green('  ✓ FFmpeg is installed: ') + C.gray(findProgram('ffmpeg'))); return; }
+  const how = IS_WIN ? ['winget', ['install', '--id', 'Gyan.FFmpeg.Essentials', '-e', '--accept-source-agreements', '--accept-package-agreements', '--disable-interactivity']] : process.platform === 'darwin' ? ['brew', ['install', 'ffmpeg']] : null;
+  if (!how) { out(C.yellow('  Install FFmpeg with your package manager, for example:  sudo apt install ffmpeg')); return; }
+  const pick = await ui.select('  ' + C.bold('Install FFmpeg now?') + C.gray(IS_WIN ? ' About 100 MB from gyan.dev builds, through winget. Continuing accepts its GPL licence and the winget terms.' : ' Through Homebrew.'), [{ label: 'Yes, install it' }, { label: 'No' }]);
+  if (pick !== 0) { out(C.gray('  (nothing installed)')); return; }
+  const ac = new AbortController(); ui.abort = ac;
+  spinner.start('Installing FFmpeg');
+  try { const r = await runProgram(how[0], how[1], { signal: ac.signal }); spinner.stop(); FF = null; if (findProgram('ffmpeg')) out(C.green('  ✓ FFmpeg is ready.')); else out(C.red('  The install did not finish: ') + C.gray((r.out + r.err).trim().split('\n').slice(-3).join(' | '))); }
+  catch (e) { spinner.stop(); out(C.red('  ' + (e.name === 'AbortError' ? 'Stopped.' : `Could not run ${how[0]}: ${e.message}`))); }
+  finally { spinner.stop(); ui.abort = null; }
+}
+async function videoCmd(arg) {
+  const text = String(arg || '').trim(), [sub, ...rest] = text.split(/\s+/), val = rest.join(' ').replace(/^["']|["']$/g, '');
+  if (!text) {
+    out(C.bold('  Video editing') + C.gray(findProgram('ffmpeg') ? ' · ready' : ' · needs FFmpeg: /video setup'));
+    out(C.gray('  Ask in plain words, naming your files:\n    cut clip.mp4 to 0:10-0:45 and add a fade out\n    make intro.mp4 twice as fast, then join it to main.mp4 with a dissolve\n    remove the pauses and background noise from talk.mp4, add music.mp3 quietly underneath\n    replace the green screen in me.mp4 with beach.jpg and add the title "Holiday"\n  /video info <file>  ·  /video render <timeline.json>  ·  /video <request>\n  Your source files are never changed. Each render saves a timeline you can edit again.'));
+    return;
+  }
+  if (sub === 'setup' || sub === 'install') return videoSetup();
+  const ac = new AbortController(); ui.abort = ac;
+  try {
+    if (sub === 'info' && val) { const m = await probeMedia(abs(val), ac.signal); out('  ' + C.bold(rel(m.file)) + '\n  ' + C.gray(mediaLine(m))); return; }
+    if (sub === 'render' && val) {
+      spinner.start('Rendering video');
+      const r = await renderVideo({ project: val }, { signal: ac.signal, progress: p => spinner.set(`Rendering video ${p}%`) });
+      spinner.stop(); out(C.green('  ✓ Rendered ') + C.bold(rel(r.output)) + C.gray(' · ' + mediaLine(r.made))); return;
+    }
+  } catch (e) { spinner.stop(); out(C.red('  ' + (e.name === 'AbortError' ? 'Stopped.' : e.message))); return; }
+  finally { spinner.stop(); ui.abort = null; }
+  if (!findProgram('ffmpeg')) { out(C.yellow('  ' + NO_FFMPEG.replace('The user can install it', 'Install it'))); return; }
+  await runTurn(`Video editing request: ${text}\nUse the VideoInfo tool to look at the files first, then VideoRender.`);
+}
+
 // ───────────────────────────── computer control: the model sees the screen and uses the mouse and keyboard ─────────────────────────────
 const COMPUTER_OFF = 'I cannot do this: controlling your computer needs bypass permissions to be on. Turn it on with /bypasspermissions, then ask me again.';
 // The Windows helper (screen capture, mouse, keyboard, the Esc stop key). Written to ~/.panda/desk.ps1 and run only while a task runs.
@@ -4364,6 +4864,7 @@ ${C.bold('Commands')}
   ${C.bamboo('/plan')}              Plan mode: look and plan, change nothing
   ${C.bamboo('/bypasspermissions')} Run everything without asking ${C.gray('(also allows computer control)')}
   ${C.bamboo('/computer')} <task>    Panda sees your screen and uses the mouse and keyboard ${C.gray('(or say "control my computer to ..."; Esc stops it)')}
+  ${C.bamboo('/video')} <request>    Edit video: cut, speed, colour, green screen, titles, music ${C.gray('(setup · info <file> · render <timeline.json>)')}
   ${C.bamboo('/ctx')} [tokens]      Context window size (Ollama num_ctx), now ${state.numCtx}
   ${C.bamboo('/fast')}              Toggle fast mode (turns model thinking off — much quicker replies)
   ${C.bamboo('/pin')} [on|off]      Keep the panda banner pinned to the top of the window
@@ -4461,6 +4962,7 @@ async function slash(text) {
     }
     case '/yolo': out(C.yellow('  /yolo has been renamed to ') + C.bamboo('/bypasspermissions')); break;
     case '/computer': await computerCmd(arg); break;
+    case '/video': await videoCmd(arg); break;
     case '/ctx': { const n = parseInt(arg.replace(/k$/i, '000'), 10); if (n >= 2048) { state.numCtx = n; saveConfig(); warmModel(); } out(C.gray('  ⎿  Context window: ') + C.bamboo(state.numCtx) + C.gray(' tokens')); break; }
     case '/fast': {
       // Thinking models spend many tokens reasoning before every reply; turning it off is the biggest speed win.

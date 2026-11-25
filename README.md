@@ -61,6 +61,26 @@ Needs a model that can see images (marked "vision" in `/model`) and **bypass per
 
 **Be careful:** a model controlling your PC can make mistakes. Close anything sensitive, stay nearby, and do not use it for payments or irreversible actions. Panda will not type into password boxes. Esc and clicks may not reach programs running as administrator.
 
+## Video editing
+
+Ask in plain words, naming your files:
+
+```
+cut holiday.mp4 to 0:10-0:45 and fade out at the end
+make intro.mp4 twice as fast and join it to main.mp4 with a dissolve
+remove the pauses and background noise from talk.mp4 and put music.mp3 quietly underneath
+replace the green screen in me.mp4 with beach.jpg, add the title "Summer", make it vertical
+```
+
+Panda edits on a timeline, like a desktop editor, and renders with [FFmpeg](https://ffmpeg.org). Run `/video setup` once if FFmpeg is not installed.
+
+- **Cut:** trim, split, reorder, remove quiet pauses.
+- **Speed and motion:** faster, slow motion, reverse, freeze frames, rotate, crop.
+- **Picture:** colour correction, filters, `.cube` colour files, green screen, logos and picture-in-picture, titles, subtitles, transitions, vertical or square output.
+- **Sound:** volume, fades, noise reduction, music and effects on their own tracks, lower the music under speech, standard loudness.
+
+Your source files are never changed. Each render saves a `.timeline.json` beside the result, so the edit can be changed and rendered again. Export to MP4, MOV, MKV, WebM, GIF or sound only. A model that can see images can look at frames to find the moment you mean.
+
 ## Update
 
 ```
