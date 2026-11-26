@@ -55,9 +55,11 @@ Say `remember that I prefer short answers` and Panda keeps it for every future c
 | `ultra` | yes | up to 1 time | 200 steps | also plan and handle edge cases |
 | `extreme` | yes | up to 2 times | 300 steps | also compare alternatives and try to break it |
 | `overdrive` | yes | up to 3 times | 400 steps | also write and run tests |
-| `ultracode` | yes | up to 5 times | 600 steps | production quality, with nothing left unfinished |
+| `ultracode` | yes | always 24 more passes | 3750 steps | production quality, with nothing left unfinished |
 
-From `high` up, a single reply may also be longer when the context window is large enough. A check happens only after Panda edits files, and stops as soon as a pass changes nothing. With **ULTRACODE** on, the prompt and the line above it flow in rainbow colours.
+From `high` up, a single reply may also be longer when the context window is large enough. A check happens only after Panda edits files. Up to `overdrive`, checking stops as soon as a pass changes nothing.
+
+**ULTRACODE** works 25 times over: it does the task, then goes through 24 more passes, each looking from one side: requirements, running it, tests, edge cases, bad input, logic, boundaries, types, callers, security, speed, timing, cleanup, other systems, breaking nothing, simplicity, readability, project style, leftovers, dependencies, documentation, a hostile review, trying to break it, and a final proof with a report. It has 25 times the normal step budget. A task that takes a minute can take half an hour; press Esc to stop and keep the work done so far. In the default permission mode you are asked before each command, so consider `/bypasspermissions` in a project you trust. While it is on, the prompt and the line above it flow in rainbow colours.
 
 Higher levels are much slower. They make a local model take more care; they do not make it a bigger model. Thinking applies to Ollama models that support it. `/think` and `/fast` can still change thinking afterwards.
 
@@ -72,7 +74,7 @@ Needs a model that can see images (marked "vision" in `/model`) and **bypass per
 
 1. For the first computer task in a conversation, Panda repeats your request and its plan and waits for your yes. After that it starts straight away; `/clear` makes it ask once more.
 2. It shares your screen with the local model (captured at 30 fps, seen at 480p, with no border on screen), minimises its own window, then moves the mouse smoothly (it never jumps), clicks and types. The model looks at the newest frame at every step; no local model can process all 30 frames each second.
-3. Items Windows can describe are clicked at their exact centre. Anything else is checked in a full-resolution close-up before the click.
+3. Each look at the screen is kept short so it is quick: with `qwen3.8:27b` on an RTX 4090 it typically takes 0.6 to 0.8 seconds, nearly always about 1 at most. Panda shows the time beside every step. A slower model or graphics card takes longer, and the first look after the model has been unloaded waits for it to load. Items Windows can describe are clicked at their exact centre. Anything else is checked in a full-resolution close-up before the click.
 4. **Press Esc at any time, in any window**, and everything stops at once.
 
 `/computer screen 2|all`, `/computer res 720` (sharper, slower), `/computer window keep`.
@@ -103,7 +105,7 @@ How it stays contained:
 
 `/play minutes 20` sets how long it plays (10 by default). If the camera turns too far or not far enough, set `/play sensitivity` to the game's own mouse sensitivity (100 is the default).
 
-**What to expect:** a local model takes a few seconds for each move, and the game keeps running while it thinks. It suits slow-paced tasks (gathering, building, menus, turn-based and puzzle games), not fights or reflexes. In Minecraft use Peaceful difficulty. Small models get lost easily. Use single player or a server that allows bots. A game running as administrator will not receive input.
+**What to expect:** each move takes under a second with a fast model on a strong graphics card (longer with slower ones, and for models that cannot see, which need two looks), and the game keeps running while it thinks. It suits slow-paced tasks (gathering, building, menus, turn-based and puzzle games), not fights or reflexes. In Minecraft use Peaceful difficulty. Small models get lost easily. Use single player or a server that allows bots. A game running as administrator will not receive input.
 
 ## Video editing
 

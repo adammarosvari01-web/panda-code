@@ -13,7 +13,7 @@ const { StringDecoder } = require('string_decoder');
 const { setMaxListeners } = require('events'); // one Esc signal is shared by many steps of a long task
 const { Writable } = require('stream');
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const IS_WIN = process.platform === 'win32';
 const HOME_DIR = path.join(os.homedir(), '.panda');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -51,6 +51,33 @@ function rainbow(text, shift = 0) {
 // what it is told about care, and how many times it is sent back to check files it changed.
 const CAREFUL = 'Read the relevant code before changing it, and check your work (run the tests or the program) before saying it is done.';
 const PLANNED = CAREFUL + ' For anything with more than one step, plan with TodoWrite first. Handle edge cases and errors, not only the normal case.';
+// ULTRACODE works 25 times over: after the task itself (pass 1), these 24 passes each look at the changed code from one side.
+const ULTRA_PASSES = [
+  ['requirements', 'Read my request again, sentence by sentence, and finish anything that is missing or only half done.'],
+  ['running it', 'Run the program or call the new code for real, and read what it actually prints and returns.'],
+  ['tests', 'Make sure tests cover the main behaviour, writing them if there are none, and run them.'],
+  ['edge cases', 'Try empty, missing, zero, negative, very large and repeated inputs, and text in other languages.'],
+  ['bad input and errors', 'Check that wrong input and failing files, commands or connections are handled with a clear message.'],
+  ['logic', 'Trace the changed code line by line with example values, looking for wrong conditions and wrong results.'],
+  ['boundaries', 'Look for off-by-one mistakes in loops, ranges, indexes, limits and comparisons.'],
+  ['types and empty values', 'Look for values that can be undefined, null, or of another type than the code assumes.'],
+  ['callers', 'Search the project for everything that uses what you changed, and make sure it still fits.'],
+  ['security', 'Look for injection, unsafe paths, leaked secrets and trust in outside data.'],
+  ['speed', 'Look for work that becomes slow with much data, and fix what matters.'],
+  ['timing', 'Look for race conditions, forgotten waits and operations that can happen in the wrong order.'],
+  ['cleanup', 'Check that files, processes, timers and connections are closed, also when something fails.'],
+  ['other systems', 'Check paths, line endings, encodings and commands on Windows, macOS and Linux.'],
+  ['nothing broken', 'Run the project\'s whole test suite, build or linter, whatever exists, and fix what your change broke.'],
+  ['simplicity', 'Remove duplication, dead code and needless complexity without changing behaviour.'],
+  ['readability', 'Make names and structure clear to the next person who reads this.'],
+  ['project style', 'Make the new code match how the rest of the project is written.'],
+  ['leftovers', 'Remove placeholders, TODOs, debug output, commented-out code and temporary files you added.'],
+  ['dependencies', 'Check that every import, function and library you use really exists in the versions installed.'],
+  ['documentation', 'Make sure comments, help text and any README say what the code now does.'],
+  ['hostile review', 'Read all your changes as a strict reviewer who wants to reject them, and answer every objection.'],
+  ['breaking it', 'Write inputs designed to break the code, run them, and fix what fails.'],
+  ['final proof', 'Run the tests or the program one last time. Then report on the whole request: what you built or changed, what you verified and how, and what you could not check.'],
+];
 const EFFORTS = {
   low: { name: 'Low', about: 'quickest: no thinking, short answers', think: false, steps: 60, reviews: 0, output: 0, prompt: 'Be quick: do exactly what was asked with as few tool calls as possible, and answer briefly.' },
   medium: { name: 'Medium', about: 'the normal setting', think: null, steps: 150, reviews: 0, output: 0, prompt: '' },
@@ -58,7 +85,7 @@ const EFFORTS = {
   ultra: { name: 'Ultra', about: 'plans, and reviews changed files once', think: true, steps: 200, reviews: 1, output: 32768, prompt: PLANNED },
   extreme: { name: 'Extreme', about: 'deeper checks, 2 reviews of changes', think: true, steps: 300, reviews: 2, output: 32768, prompt: PLANNED + ' Before choosing a solution, compare it with at least one alternative. Test what you changed, including inputs that could break it.' },
   overdrive: { name: 'Overdrive', about: 'relentless: tests everything, 3 reviews', think: true, steps: 400, reviews: 3, output: 49152, prompt: PLANNED + ' Compare alternative solutions first. Write tests for what you change, run them, and fix every failure. Look for other places in the project that the change affects. Do not stop while anything is unfinished or untested.' },
-  ultracode: { name: 'ULTRACODE', about: 'maximum: production-grade coding, 5 reviews', think: true, steps: 600, reviews: 5, output: 65536, prompt: PLANNED + ' Work like a senior engineer shipping to production. Explore the project thoroughly first, using Task sub-agents for wide searches. Plan, then implement completely: no placeholders, stubs or "left as an exercise". Write tests, run them and fix every failure. Reread each change line by line looking for bugs, security problems and broken callers. Never say something works unless you saw it work, and report plainly what you could not check. Do not stop while anything is unfinished.' },
+  ultracode: { name: 'ULTRACODE', about: 'maximum: 25 passes over your code, 25× the step budget', think: true, steps: 25 * 150, reviews: ULTRA_PASSES.length, thorough: true, output: 65536, prompt: PLANNED + ' Work like a senior engineer shipping to production. Explore the project thoroughly first, using Task sub-agents for wide searches. Plan, then implement completely: no placeholders, stubs or "left as an exercise". Write tests, run them and fix every failure. Reread each change line by line looking for bugs, security problems and broken callers. Never say something works unless you saw it work, and report plainly what you could not check. Do not stop while anything is unfinished. After you change files, Panda sends you through further passes with one focus each: take each one seriously and look with fresh eyes.' },
 };
 const EFFORT_ALIAS = { lo: 'low', med: 'medium', normal: 'medium', default: 'medium', hi: 'high', extreeme: 'extreme', xtreme: 'extreme', over: 'overdrive', 'ultra-code': 'ultracode', max: 'ultracode' };
 const effortKey = s => { const k = String(s || '').toLowerCase().replace(/\s+/g, ''); return Object.hasOwn(EFFORTS, k) ? k : Object.hasOwn(EFFORT_ALIAS, k) ? EFFORT_ALIAS[k] : ''; };
@@ -1808,7 +1835,7 @@ async function* streamOllama({ system, messages, tools, signal }) {
     else msgs.push(m.images?.length ? { role: m.role, content: m.content, images: m.images.map(i => i.data) } : { role: m.role, content: m.content });
   }
   // keep_alive: keep the model in VRAM between turns (Ollama's default unloads it after 5 idle minutes).
-  const body = { model: curModel(), messages: msgs, stream: true, keep_alive: state.keepAlive, options: { num_ctx: als.getStore()?.ctxSize ?? state.numCtx, num_predict: als.getStore()?.numPredict ?? replyLimit() } };
+  const body = { model: curModel(), messages: msgs, stream: true, keep_alive: state.keepAlive, options: { num_ctx: als.getStore()?.ctxSize ?? state.numCtx, num_predict: als.getStore()?.numPredict ?? replyLimit(), temperature: als.getStore()?.temperature } };
   if (tools) body.tools = toolSpecs(tools);
   if (als.getStore()?.format) body.format = als.getStore().format; // structured JSON output (used by /learn)
   { const th = als.getStore()?.think !== undefined ? als.getStore().think : state.think; if (th !== null && th !== undefined && !(th && state.noThink === body.model)) body.think = th; }
@@ -1834,7 +1861,7 @@ async function* streamOpenAI({ system, messages, tools, signal }) {
     else if (m.role === 'tool') msgs.push({ role: 'tool', tool_call_id: m.tool_call_id, content: m.content });
     else msgs.push(m.images?.length ? { role: m.role, content: [{ type: 'text', text: m.content || ' ' }, ...m.images.map(i => ({ type: 'image_url', image_url: { url: `data:${i.mime};base64,${i.data}` } }))] } : { role: m.role, content: m.content });
   }
-  const body = { model: curModel(), messages: msgs, stream: true, stream_options: { include_usage: true } };
+  const body = { model: curModel(), messages: msgs, stream: true, stream_options: { include_usage: true }, temperature: als.getStore()?.temperature };
   if (tools) body.tools = toolSpecs(tools);
   const t0 = Date.now();
   const res = await fetch(state.baseUrl.replace(/\/+$/, '') + '/chat/completions', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body), signal });
@@ -2029,6 +2056,7 @@ async function agentLoop(messages, opts) {
   let overflow = 0, cont = 0, trunc = 0, empty = 0; const fails = new Map();
   const level = effort(), limit = opts.depth === 0 ? level.steps : 150;
   let reviews = 0, editsSeen = state.edits;
+  const asked = opts.depth === 0 ? String(lastUserRequest(messages)).slice(0, 4000) : ''; // kept for the review passes, even after compaction
   for (let step = 0; step < limit; step++) {
     if (opts.depth === 0) await maybeCompact(opts);
     let r;
@@ -2084,12 +2112,23 @@ async function agentLoop(messages, opts) {
         messages.push({ role: 'user', content: '[Your previous reply hit the output token limit and was cut off. Continue exactly where you stopped. Do not repeat anything.]' });
         continue;
       }
-      // Higher effort levels send the model back over files it changed, until a pass changes nothing or the passes run out.
-      if (opts.depth === 0 && reviews < level.reviews && state.edits > editsSeen && !opts.signal.aborted) {
+      // Higher effort levels send the model back over files it changed. Most stop as soon as a pass changes nothing;
+      // ULTRACODE, once files have changed, always goes through every one of its passes.
+      if (opts.depth === 0 && reviews < level.reviews && (state.edits > editsSeen || (level.thorough && reviews > 0)) && !opts.signal.aborted) {
         reviews++; editsSeen = state.edits;
-        const note = `  ✻ ${level.name}: checking the work (review ${reviews} of up to ${level.reviews})`;
-        out(state.effort === 'ultracode' ? rainbow(note) : C.gray(note));
-        messages.push({ role: 'user', content: `[Panda self-review ${reviews} of up to ${level.reviews}: check the work you just did against my request. Reread the files you changed, run the tests or the program, and fix anything that is wrong, missing or untested. If it is all correct, say so briefly and change nothing.]` });
+        empty = cont = trunc = overflow = 0; fails.clear(); // each pass gets its own allowance for retries
+        let review;
+        if (level.thorough) {
+          const [focus, what] = ULTRA_PASSES[reviews - 1];
+          out(rainbow(`  ✻ ULTRACODE pass ${reviews + 1} of ${level.reviews + 1}: ${focus}`) + C.gray('  (esc stops, the work so far is kept)'));
+          review = `[Panda self-review ${reviews} of ${level.reviews} (${focus}). ${what} Fix every real problem you find and run the code again after changing it. If there is nothing to fix here, say so in one line and change nothing. Do not add features that were not asked for.\nThe request being worked on:\n${asked}]`;
+        } else {
+          out(C.gray(`  ✻ ${level.name}: checking the work (review ${reviews} of up to ${level.reviews})`));
+          review = `[Panda self-review ${reviews} of up to ${level.reviews}: check the work you just did against my request. Reread the files you changed, run the tests or the program, and fix anything that is wrong, missing or untested. If it is all correct, say so briefly and change nothing.\nThe request being worked on:\n${asked}]`;
+        }
+        await maybeCompact(opts); // make room now, so the instruction is not summarised away
+        const last = messages[messages.length - 1];
+        if (last?.role === 'user') last.content += '\n\n' + review; else messages.push({ role: 'user', content: review });
         continue;
       }
       return r.text;
@@ -2152,7 +2191,13 @@ function hardTrim(msgs, target = 0.5) {
   while (msgs.length > 1 && msgs[0].role !== 'user') msgs.shift();
 }
 function lastUserRequest(msgs) {
-  for (let i = msgs.length - 1; i >= 0; i--) { const m = msgs[i]; if (m.role === 'user' && !/^\[(Request interrupted|previous request failed|Your previous reply|Your last reply|Panda self-review)/.test(m.content || '') && !/^\(Earlier conversation was compacted/.test(m.content || '')) return m.content; }
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]; if (m.role !== 'user' || /^\[(Request interrupted|previous request failed|Your previous reply|Your last reply|Panda self-review)/.test(m.content || '')) continue;
+    if (!/^\(Earlier conversation was compacted/.test(m.content || '')) return m.content;
+    // after a compaction the request lives inside Panda's note: read it back, so a second compaction does not lose it
+    const kept = String(m.content).match(/My most recent request was:\n\n([\s\S]*?)\n\nContinue working on it from where you left off\./);
+    if (kept) return kept[1];
+  }
   return '';
 }
 // Keeps the conversation inside the context window so nothing is silently dropped by the server.
@@ -4731,10 +4776,12 @@ const desk = {
 const CTL_MAX_STEPS = 60;
 const CTL_ACTIONS = ['click', 'double_click', 'right_click', 'move', 'drag', 'scroll', 'type', 'key', 'open_app', 'zoom', 'switch_screen', 'wait', 'done', 'give_up'];
 const INT = { type: 'integer' }, STR = { type: 'string' };
-const CTL_SHAPE = { type: 'object', properties: { see: STR, action: { type: 'string', enum: CTL_ACTIONS }, element: INT, target: STR, x: INT, y: INT, to_x: INT, to_y: INT, text: STR, keys: STR, amount: INT, message: STR }, required: ['see', 'action', 'target'] };
+const CTL_SHAPE = { type: 'object', properties: { action: { type: 'string', enum: CTL_ACTIONS }, element: INT, target: STR, x: INT, y: INT, to_x: INT, to_y: INT, text: STR, keys: STR, amount: INT, message: STR }, required: ['action', 'target'] };
 const CTL_PLAN_SHAPE = shapeOf({ understood: STR, steps: { type: 'array', items: STR } });
 const CTL_FIND_SHAPE = shapeOf({ found: { type: 'boolean' }, x: INT, y: INT });
 const ctlSystem = () => `You are controlling the user's Windows PC to do one task for them. Each turn you get a fresh screenshot and a numbered list of things you can click. Reply with exactly ONE next action, as JSON.
+Answer at once: one short line of JSON with only the fields that action needs, and no description or explanation. For example {"action":"click","element":4,"target":"the Save button"} or {"action":"key","keys":"ctrl+s","target":"save"}.
+Field names: action, element, target, x, y, to_x, to_y, text, keys, amount, message.
 
 Pointing:
 - If what you want is in the list, set "element" to its number. That click is exact, so prefer it.
@@ -4752,8 +4799,8 @@ Actions:
 - zoom: x + y; the next turn also shows a close-up of that spot, to read small text
 - switch_screen: amount is the screen number
 - wait: amount in seconds, while something is loading
-- done: "message" says what you did and what is on screen now. Use it only when the screenshot shows the task is finished.
-- give_up: "message" says why it cannot be done
+- done: "message" says in at most 15 words what you did. Use it only when the screenshot shows the task is finished.
+- give_up: "message" says in at most 15 words why it cannot be done
 
 Rules:
 - Do exactly the task and nothing extra. Check on the next screenshot that your last action worked; if nothing changed, try another way.
@@ -4761,16 +4808,46 @@ Rules:
 - Never type passwords or payment or identity details, never solve CAPTCHAs, and never buy, send, post or delete anything unless the task clearly asks for it. If one of these is in the way, give_up and say what the user needs to do.`;
 
 // One model call for the computer loop: no thinking and a short answer, so each step is quick. Same context size, so the model is not reloaded.
-async function ctlModel({ system, user, images, format, signal, numPredict = 500, model, ctxSize }) {
+async function ctlModel({ system, user, images, format, signal, numPredict = 500, model, ctxSize, loose }) {
   let text = '';
-  await als.run({ think: false, model: model || state.model, numPredict, format, ctxSize }, async () => {
+  // Reading a picture, the model should give its surest answer every time. When it is going round in circles ("loose"), it may vary.
+  await als.run({ think: false, model: model || state.model, numPredict, format, ctxSize, temperature: images?.length && !loose ? 0 : undefined }, async () => {
     for await (const ev of streamChat({ system, messages: [images?.length ? { role: 'user', content: user, images } : { role: 'user', content: user }], tools: null, signal })) {
-      if (ev.type === 'text') { text += ev.text; spinner.tokens++; } else if (ev.type === 'think') spinner.tokens++;
+      if (ev.type === 'text') { text += ev.text; spinner.tokens++; if (ev.text.includes('}') && ctlComplete(text)) break; } else if (ev.type === 'think') spinner.tokens++;
       else if (ev.type === 'usage') { state.lastTps = ev.tps; state.totalIn += ev.prompt; state.totalOut += ev.completion; }
     }
   });
   if (signal?.aborted) { const e = new Error('aborted'); e.name = 'AbortError'; throw e; }
   return extractJSON(text);
+}
+// Is the answer already a whole JSON object? Then there is nothing to wait for (some models keep writing blank lines after it).
+function ctlComplete(text) {
+  const s = text.replace(/^\s*(?:<think>[\s\S]*?<\/think>)?\s*(?:```(?:json)?)?/, '').trim();
+  if (!s.startsWith('{') || !s.endsWith('}')) return false;
+  try { JSON.parse(s); return true; } catch { return false; }
+}
+// A look at a screenshot has to be quick. Ollama writes free JSON about twice as fast as JSON forced into an exact shape,
+// so that is asked for first. A model whose quick answer is unusable gets the exact shape, from then on.
+const ctlStrict = new Set();
+async function ctlReview(o, usable) {
+  const name = o.model || state.model, tidy = r => r && typeof r === 'object' && !Array.isArray(r) ? coerceArgs(o.format, r) : r;
+  if (state.kind === 'ollama' && !ctlStrict.has(name)) {
+    const r = tidy(await ctlModel({ ...o, format: 'json' }));
+    if (usable(r)) return r;
+    ctlStrict.add(name);
+  }
+  return tidy(await ctlModel(o));
+}
+// Does this computer action come with what it needs?
+const ctlUsable = a => !!a && CTL_ACTIONS.includes(a.action)
+  && (!['click', 'double_click', 'right_click', 'move'].includes(a.action) || a.element > 0 || ctlHasXY(a))
+  && (a.action !== 'type' || !!a.text) && (a.action !== 'key' || !!(a.keys || a.text)) && (a.action !== 'drag' || [a.x, a.y, a.to_x, a.to_y].every(Number.isFinite));
+const ctlSecs = since => ((Date.now() - since) / 1000).toFixed(1) + 's';
+// Ollama unloads an idle model, and loading it again takes many seconds: ask for it before the first look.
+function ctlWarm(eyes) {
+  if (state.kind !== 'ollama') return;
+  warmKey = ''; warmModel();
+  if (eyes) fetch(state.baseUrl.replace(/\/+$/, '') + '/api/generate', { method: 'POST', headers: authHeaders(), body: JSON.stringify({ model: eyes, keep_alive: state.keepAlive, options: { num_ctx: 8192 } }), signal: AbortSignal.timeout(300000) }).then(r => r.text()).catch(() => { });
 }
 const ctlJpeg = data => ({ name: 'screen.jpg', mime: 'image/jpeg', data, bytes: Math.round(data.length * 0.75) });
 async function ctlShot() {
@@ -4780,6 +4857,16 @@ async function ctlShot() {
 }
 // taskbar buttons are labelled "Firefox - 1 running window"; the program is just "Firefox"
 const ctlAppName = s => String(s).replace(/\s+-\s+\d+ running windows?$/i, '').replace(/\s+pinned$/i, '');
+// A long list is what makes a look slow, so only the most useful clickable things are sent: those the task names,
+// the taskbar (listed last) and then the rest of the window in front.
+const CTL_LISTED = 24;
+function ctlShortList(els, task) {
+  if (els.length <= CTL_LISTED) return els;
+  const words = new Set(ctlWords(task)), keep = new Set(els.filter(e => ctlWords(e.name).some(w => words.has(w))).slice(0, CTL_LISTED));
+  for (const e of [...els.slice(-6), ...els]) { if (keep.size >= CTL_LISTED) break; keep.add(e); }
+  return els.filter(e => keep.has(e)).map((e, i) => ({ ...e, no: i + 1 }));
+}
+const ctlPrompt = ({ request, screen, screens, mouse, log, els, note }) => `Task from the user: ${request}\n\nScreen ${screen} of ${screens}. Mouse at (${mouse.x}, ${mouse.y}).\n\nWhat you have done so far:\n${log.length ? log.slice(-6).map(l => l.length > 100 ? l.slice(0, 100) + '…' : l).join('\n') : '(nothing yet)'}\n\nThings you can click (number, kind, "name", x, y):\n${els.length ? els.map(e => `${e.no}. ${e.kind} "${e.name.slice(0, 30)}" ${e.gx},${e.gy}`).join('\n') : '(no list this time: use x and y)'}\n${note ? '\n' + note + '\n' : ''}\nWhat is the next action?`;
 // screen pixels <-> the 0..1000 grid the model points with
 const ctlToScreen = (s, nx, ny) => ({ x: s.x + Math.min(s.w - 1, Math.max(0, Math.round(nx / 1000 * s.w))), y: s.y + Math.min(s.h - 1, Math.max(0, Math.round(ny / 1000 * s.h))) });
 const ctlToGrid = (s, px, py) => ({ x: Math.round((px - s.x) / s.w * 1000), y: Math.round((py - s.y) / s.h * 1000) });
@@ -4804,7 +4891,7 @@ async function ctlAim(a, shot, els, misses, signal) {
   const cx = Math.max(shot.x, Math.min(shot.x + shot.w - cw, guess.x - (cw >> 1))), cy = Math.max(shot.y, Math.min(shot.y + shot.h - ch, guess.y - (ch >> 1)));
   const crop = await desk.call(`crop ${cx} ${cy} ${cw} ${ch} ${cw * 2}`);
   spinner.set('Aiming');
-  const f = await ctlModel({ system: 'You locate things in a close-up of a computer screen. Reply as JSON.', user: `Find: ${a.target}\nGive the point at its exact centre, with x and y from 0 to 1000 across this picture (0,0 top left, 1000,1000 bottom right). Set found to false if it is not in this picture.`, images: [ctlJpeg(crop)], format: CTL_FIND_SHAPE, signal, numPredict: 80 });
+  const f = await ctlReview({ system: 'You locate things in a close-up of a computer screen. Reply with one line of JSON: {"found":true,"x":500,"y":500}', user: `Find: ${a.target}\nGive the point at its exact centre, with x and y from 0 to 1000 across this picture (0,0 top left, 1000,1000 bottom right). Set found to false if it is not in this picture.`, images: [ctlJpeg(crop)], format: CTL_FIND_SHAPE, signal, numPredict: 80 }, r => !!r && typeof r.found === 'boolean' && (!r.found || (Number.isFinite(r.x) && Number.isFinite(r.y))));
   if (f && f.found && f.x >= 0 && f.x <= 1000 && f.y >= 0 && f.y <= 1000) return { x: cx + Math.min(cw - 1, Math.round(f.x / 1000 * cw)), y: cy + Math.min(ch - 1, Math.round(f.y / 1000 * ch)), how: 'zoomed in' };
   const key = String(a.target).toLowerCase(), n = (misses.get(key) || 0) + 1; misses.set(key, n);
   if (n < 2) throw new Error(`a close-up of that spot does not show "${a.target}". Look at the screenshot again and give a better position or an element number`);
@@ -4921,6 +5008,7 @@ async function computerTask(task, ac) {
   const done = (okay, text, extra = {}) => ({ ok: okay, text: text + (log.length ? `\nSteps taken:\n${log.join('\n')}` : ''), ...extra });
   try {
     spinner.start('Starting the screen share');
+    ctlWarm();
     await desk.start();
     signal.addEventListener('abort', () => desk.abort(), { once: true });
     desk.onEsc = () => { // the user's Esc, from any window: stop everything, at once
@@ -4942,10 +5030,12 @@ async function computerTask(task, ac) {
     for (let step = 1; step <= CTL_MAX_STEPS; step++) {
       if (signal.aborted) break;
       spinner.start(`Looking at the screen (step ${step})`);
-      const shot = await ctlShot(), els = await ctlElements(shot), zoom = c.zoom; c.zoom = null;
+      const shot = await ctlShot(), els = ctlShortList(await ctlElements(shot), ok.request), zoom = c.zoom; c.zoom = null;
       const mouse = ctlToGrid(shot, shot.mx, shot.my);
-      const user = `Task from the user: ${ok.request}\n\nScreen ${c.screen} of ${desk.screens.length}. Mouse at (${mouse.x}, ${mouse.y}).\n\nWhat you have done so far:\n${log.length ? log.slice(-14).join('\n') : '(nothing yet)'}\n\nThings you can click (number, kind, "name", x, y):\n${els.length ? els.map(e => `${e.no}. ${e.kind} "${e.name}" ${e.gx},${e.gy}`).join('\n') : '(no list this time: use x and y)'}\n${zoom ? '\n' + zoom.note + '\n' : ''}\nWhat is the next action?`;
-      const a = await ctlModel({ system: ctlSystem(), user, images: zoom ? [ctlJpeg(shot.data), ctlJpeg(zoom.data)] : [ctlJpeg(shot.data)], format: CTL_SHAPE, signal });
+      const user = ctlPrompt({ request: ok.request, screen: c.screen, screens: desk.screens.length, mouse, log, els, note: zoom?.note });
+      const looked = Date.now();
+      const a = await ctlReview({ system: ctlSystem(), user, images: zoom ? [ctlJpeg(shot.data), ctlJpeg(zoom.data)] : [ctlJpeg(shot.data)], format: CTL_SHAPE, signal, loose: invalid > 0 || same >= 1 || streak >= 3 }, ctlUsable);
+      const took = ctlSecs(looked);
       if (!a || !CTL_ACTIONS.includes(a.action)) { spinner.stop(); if (++invalid >= 3) return done(false, 'The model did not give usable actions, so Panda stopped.'); log.push(`${step}. (your reply was not a valid action)`); continue; }
       invalid = 0;
       if (a.action === 'done' || a.action === 'give_up') { spinner.stop(); return done(a.action === 'done', String(a.message || a.see || (a.action === 'done' ? 'Done.' : 'It could not be done.'))); }
@@ -4965,8 +5055,8 @@ async function computerTask(task, ac) {
         const changed = a.action === 'zoom' || a.action === 'wait' ? true : (await desk.call('settle 2000')).startsWith('1');
         spinner.stop();
         if (a.action !== 'wait') moved = changed;
-        out(C.bamboo('  ● ') + C.bold(what));
-        result = `${what} -> ${changed ? 'the screen changed' : 'no visible change (normal when only focusing a field; otherwise try another way)'}${same >= 2 ? ' (you keep repeating this: try something else)' : ''}`;
+        out(C.bamboo('  ● ') + C.bold(what) + C.gray(`  · looked ${took}`));
+        result =`${what} -> ${changed ? 'the screen changed' : 'no visible change (normal when only focusing a field; otherwise try another way)'}${same >= 2 ? ' (you keep repeating this: try something else)' : ''}`;
         if (!changed) out(C.gray('  ⎿  nothing visibly changed'));
       } catch (e) {
         spinner.stop();
@@ -5142,8 +5232,9 @@ function gameAim(x, y, shot, fov) {
 // pixels of mouse movement for one degree of turning, from Minecraft's sensitivity slider (100% is its default)
 const gamePpd = percent => { const f = percent / 200 * 0.6 + 0.2; return 1 / (0.15 * 8 * f * f * f); };
 const GAME_DO = ['move', 'press', 'aim', 'look', 'attack', 'use', 'click', 'right_click', 'drag', 'wait'];
-const GAME_SHAPE = { type: 'object', properties: { see: STR, plan: STR, actions: { type: 'array', maxItems: 4, items: { type: 'object', properties: { do: { type: 'string', enum: GAME_DO }, keys: STR, seconds: { type: 'number' }, x: INT, y: INT, to_x: INT, to_y: INT, turn: INT, tilt: INT }, required: ['do'] } }, status: { type: 'string', enum: ['playing', 'done', 'give_up'] }, message: STR }, required: ['see', 'plan', 'actions', 'status'] };
-const GAME_EYES_SHAPE = shapeOf({ summary: STR, things: { type: 'array', maxItems: 20, items: shapeOf({ name: STR, x: INT, y: INT }) } });
+const GAME_SHAPE = { type: 'object', properties: { plan: STR, actions: { type: 'array', maxItems: 4, items: { type: 'object', properties: { do: { type: 'string', enum: GAME_DO }, keys: STR, seconds: { type: 'number' }, x: INT, y: INT, to_x: INT, to_y: INT, turn: INT, tilt: INT }, required: ['do'] } }, status: { type: 'string', enum: ['playing', 'done', 'give_up'] }, message: STR }, required: ['plan', 'actions'] };
+const GAME_EYES_SHAPE = shapeOf({ summary: STR, things: { type: 'array', maxItems: 8, items: shapeOf({ name: STR, x: INT, y: INT }) } });
+const gameUsable = r => !!r && (r.status === 'done' || r.status === 'give_up' || (Array.isArray(r.actions) && r.actions.some(a => a && GAME_DO.includes(a.do))));
 const GAME_CHECK_SHAPE = shapeOf({ proof: STR, reached: { type: 'boolean' } });
 const gameSystem = (skill, sees) =>`You are playing a video game for the user on their PC with the keyboard and mouse. Each turn you get ${sees ? 'a picture of the game' : 'a description of what is on screen'} and you reply with your next few actions as JSON and nothing else.
 
@@ -5162,8 +5253,8 @@ ${skill.camera ? '{"do":"aim","x":620,"y":410}   turn your view so that this poi
 x and y are whole numbers from 0 to 1000 across the picture (0,0 top left, 1000,1000 bottom right). A move or hold lasts at most 10 seconds.
 
 # Your reply
-{"see":"what is on screen, one sentence","plan":"what you are doing now, a few words","actions":[...],"status":"playing","message":""}
-Use status "done" only when the screen shows the goal is reached, and "give_up" only if it cannot be reached; say why in "message".
+Answer at once with one short line of JSON and nothing more: {"plan":"at most 6 words","actions":[...]}
+Add "status":"done" only when the screen shows the goal is reached, or "status":"give_up" only if it cannot be reached, and say why in "message".
 
 Rules:
 - Do a few short actions, then look again. Check that the last ones worked; if nothing changed, do something different.
@@ -5265,6 +5356,7 @@ async function playGame(game, goal, ac) {
   const onAbort = () => desk.abort();
   try {
     spinner.start('Starting the screen share');
+    ctlWarm(eyes);
     await desk.start();
     signal.addEventListener('abort', onAbort, { once: true });
     desk.onEsc = () => { if (escaped) return; escaped = true; ui.queue.length = 0; side.abort?.abort(); ac.abort(); };
@@ -5300,22 +5392,24 @@ async function playGame(game, goal, ac) {
       const shot = await ctlShotClean(), info = await gameInfo();
       c.shot = shot; c.pointer = info.pointer;
       let seen = '';
+      const looked = Date.now(); // covers the eyes too, for a model that cannot see
       if (eyes) {
         spinner.set(`Looking (turn ${turns})`);
-        const e = await ctlModel({ model: eyes, ctxSize: 8192, system: 'You are the eyes of a game player who cannot see. Describe the picture of the game exactly. Reply as JSON.', user: `Game: ${skill.title}. The player's goal: ${goal}\nIn "summary" say whether a menu, inventory or death screen is open, what is in the middle of the screen, and any health, hunger, ammo or score shown. In "things" list what matters (objects, creatures, buttons, slots) with its centre as x and y from 0 to 1000 (0,0 top left), and say in its name whether it looks near (large) or far (small).`, images: [ctlJpeg(shot.data)], format: GAME_EYES_SHAPE, signal, numPredict: 700 });
+        const e = await ctlReview({ model: eyes, ctxSize: 8192, system: 'You are the eyes of a game player who cannot see. Describe the picture of the game briefly and exactly. Reply with one line of JSON: {"summary":"at most 20 words","things":[{"name":"tree, near","x":500,"y":500}]} with at most 8 things.', user: `Game: ${skill.title}. The player's goal: ${goal}\nIn "summary" say whether a menu, inventory or death screen is open, what is in the middle of the screen, and any health, hunger, ammo or score shown. In "things" list what matters (objects, creatures, buttons, slots) with its centre as x and y from 0 to 1000 (0,0 top left), and say in its name whether it looks near (large) or far (small).`, images: [ctlJpeg(shot.data)], format: GAME_EYES_SHAPE, signal, numPredict: 400 }, e => !!e?.summary && Array.isArray(e.things));
         seen = e?.summary ? `On screen: ${e.summary}\n${(Array.isArray(e.things) ? e.things : []).slice(0, 20).map(t => `- ${t.name} at ${t.x},${t.y}`).join('\n')}` : 'On screen: (no description this time)';
         spinner.set(`Playing (turn ${turns})`);
       }
       const left = Math.max(0, Math.round((ends - Date.now()) / 1000));
       const user = `Goal from the user: ${goal}\nTime left: ${Math.floor(left / 60)}m ${left % 60}s\n${skill.camera ? (info.pointer ? 'A mouse pointer is showing: a menu or inventory is probably open.' : 'No mouse pointer: you are in the game world.') : ''}\nYour plan last turn: ${plan || '(none yet)'}\n\nWhat happened so far:\n${log.length ? log.slice(-10).join('\n') : '(nothing yet)'}${still >= 3 ? '\n\nThe screen has hardly changed for several turns. You may be stuck: turn, jump, close a menu or try another control.' : ''}${repeats >= 2 ? `\n\nYou have done the same kind of actions ${repeats + 1} turns in a row. If that is not working, do something different: walk closer, turn, or try another control.` : ''}${seen ? '\n\n' + seen : ''}\n\nWhat do you do now?`;
-      const r = await ctlModel({ system: gameSystem(skill, !eyes), user, images: eyes ? undefined : [ctlJpeg(shot.data)], format: GAME_SHAPE, signal, numPredict: 600 });
+      const r = await ctlReview({ system: gameSystem(skill, !eyes), user, images: eyes ? undefined : [ctlJpeg(shot.data)], format: GAME_SHAPE, signal, numPredict: 600, loose: invalid > 0 || still >= 2 || repeats >= 2 }, gameUsable);
+      const took = ctlSecs(looked);
       const actions = (Array.isArray(r?.actions) ? r.actions : []).filter(a => a && typeof a === 'object').slice(0, 4);
-      if (r?.status === 'give_up') { spinner.stop(); return done(false, String(r.message || r.see || 'It could not be done.')); }
+      if (r?.status === 'give_up') { spinner.stop(); return done(false, String(r.message || r.plan || 'It could not be done.')); }
       if (r?.status === 'done') { // models often claim success too early, so the screen is checked before Panda believes it
         spinner.set('Checking the goal');
-        const v = await ctlModel({ model: eyes || undefined, ctxSize: eyes ? 8192 : undefined, system: 'You check a picture of a video game against a goal. Be strict and honest. Reply as JSON.', user: `Goal: ${goal}\nJudging only from this picture, is there clear proof that the goal has been reached? Say in "proof" what shows it, or what is missing, then set "reached".`, images: [ctlJpeg(shot.data)], format: GAME_CHECK_SHAPE, signal, numPredict: 250 });
+        const v = await ctlReview({ model: eyes || undefined, ctxSize: eyes ? 8192 : undefined, system: 'You check a picture of a video game against a goal. Be strict and honest. Reply with one line of JSON: {"proof":"at most 12 words","reached":false}', user: `Goal: ${goal}\nJudging only from this picture, is there clear proof that the goal has been reached? Say in "proof" what shows it, or what is missing, then set "reached".`, images: [ctlJpeg(shot.data)], format: GAME_CHECK_SHAPE, signal, numPredict: 150 }, v => !!v && typeof v.reached === 'boolean');
         spinner.stop();
-        const said = String(r.message || r.see || 'Done.');
+        const said = String(r.message || r.plan || 'Done.');
         if (v?.reached === true) return done(true, said);
         if (++doubted > 2) return done(false, `The model says it is done, but Panda could not see that on screen, so check it yourself. Its report: ${said}`);
         const why = String(v?.proof || 'nothing on screen shows it').replace(/\s+/g, ' ').slice(0, 160);
@@ -5346,9 +5440,9 @@ async function playGame(game, goal, ac) {
       }
       spinner.stop();
       if (!did.length) continue;
-      out(C.bamboo('  ● ') + C.bold(maskSecret(plan || String(r.see || '')).replace(/\s+/g, ' ').slice(0, 90) || `turn ${turns}`));
-      out(C.gray('  ⎿  ' + did.join(' · ')));
-      log.push(`${turns}. saw: ${String(r.see || '').replace(/\s+/g, ' ').slice(0, 120)} | did: ${did.join('; ')}`);
+      out(C.bamboo('  ● ') + C.bold(maskSecret(plan).replace(/\s+/g, ' ').slice(0, 90) || `turn ${turns}`));
+      out(C.gray('  ⎿  ' + did.join(' · ') + ` · decided in ${took}`));
+      log.push(`${turns}. ${plan.replace(/\s+/g, ' ').slice(0, 120)} | did: ${did.join('; ')}`);
     }
     if (signal.aborted) return done(false, escaped ? 'Stopped: you pressed Esc.' : 'Stopped.', { stopped: true });
     return done(true, `Time is up after ${minutes} minutes and ${turns} turns. /play minutes changes how long Panda plays.`);
@@ -5461,6 +5555,7 @@ function setEffort(key) {
   const e = EFFORTS[key];
   state.effort = key; state.think = e.think; saveConfig(); syncRainbow();
   out(key === 'ultracode' ? rainbow(`  ★ ULTRACODE ★ ${e.about}`) : C.gray('  ⎿  Effort: ') + C.bamboo(e.name) + C.gray(` — ${e.about}`));
+  if (key === 'ultracode') out(C.gray('  After changing files it makes 24 more passes. Very slow; Esc stops and keeps the work.'));
   if (key === 'ultracode' || key === 'overdrive') out(C.gray('  Expect long waits. The model takes more care; it does not become a bigger one.'));
 }
 async function effortCmd(arg) {
